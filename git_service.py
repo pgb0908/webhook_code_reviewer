@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import logging
 import subprocess
@@ -7,12 +8,38 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+_DIFF_FILE_HEADER = re.compile(r'^diff --git ', re.MULTILINE)
+
 
 @dataclass
 class DiffResult:
     content: str
-    truncated: bool
-    original_length: int
+
+
+def split_diff_into_chunks(content: str, max_chars: int) -> list[str]:
+    """git diff를 파일 경계(diff --git)로 분할하여 max_chars 이하 청크 리스트로 반환."""
+    boundaries = [m.start() for m in _DIFF_FILE_HEADER.finditer(content)]
+    if not boundaries:
+        return [content[:max_chars]]
+
+    file_diffs = []
+    for i, start in enumerate(boundaries):
+        end = boundaries[i + 1] if i + 1 < len(boundaries) else len(content)
+        file_diffs.append(content[start:end])
+
+    chunks = []
+    current = ""
+    for fd in file_diffs:
+        if len(fd) > max_chars:
+            fd = fd[:max_chars]
+        if current and len(current) + len(fd) > max_chars:
+            chunks.append(current)
+            current = fd
+        else:
+            current += fd
+    if current:
+        chunks.append(current)
+    return chunks
 
 
 def sync_repository(settings, workspace_path: str, mr_iid: str, source_branch: str) -> bool:
@@ -67,13 +94,7 @@ def extract_diff(settings, workspace_path: str, mr_iid: str, source_branch: str,
             cwd=workspace_path, capture_output=True, text=True
         )
         content = result.stdout
-        original_length = len(content)
-        truncated = original_length > settings.diff_max_chars
-        return DiffResult(
-            content=content[:settings.diff_max_chars],
-            truncated=truncated,
-            original_length=original_length,
-        )
+        return DiffResult(content=content)
     except subprocess.CalledProcessError as e:
         error_msg = e.stderr.decode("utf-8", errors="replace").strip() if isinstance(e.stderr, bytes) else (e.stderr or "")
         logger.error(f"❌ [MR #{mr_iid}] Diff 추출 실패 (코드 {e.returncode}): {error_msg}")
