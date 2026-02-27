@@ -3,8 +3,8 @@ import logging
 from typing import Callable, Optional
 
 from git_service import sync_repository, extract_diff
-from gitlab_client import post_mr_comment
-from review_service import run_aider_review
+from gitlab_client import change_mr_overview, post_mr_comment
+from review_service import run_aider_overview, run_aider_review
 from workspace_manager import cleanup_workspace, get_workspace_path
 
 logger = logging.getLogger(__name__)
@@ -52,6 +52,45 @@ async def handle_review_task(
     await asyncio.to_thread(post_mr_comment, settings, project_id, mr_iid, review)
 
 
+async def handle_overview_task(
+    settings,
+    project_id: str,
+    mr_iid: str,
+    source_branch: str,
+    target_branch: str,
+    original_title: str,
+) -> None:
+    """4단계 파이프라인: sync → diff → overview → MR 제목/설명 교체"""
+    workspace_path = get_workspace_path(settings, mr_iid)
+    logger.info(f"작업공간: {workspace_path}")
+
+    if not source_branch or not project_id:
+        logger.error(
+            f"❌ [MR #{mr_iid}] source_branch 혹은 project_id가 없습니다 "
+            "(GitLab Webhook 테스트 페이로드일 수 있습니다.)"
+        )
+        return
+
+    # 1단계: 저장소 동기화
+    ok = await asyncio.to_thread(sync_repository, settings, workspace_path, mr_iid, source_branch)
+    if not ok:
+        return
+
+    # 2단계: Diff 추출
+    diff_result = await asyncio.to_thread(extract_diff, settings, workspace_path, mr_iid, source_branch, target_branch)
+    if diff_result is None:
+        return
+
+    # 3단계: AI overview 생성
+    result = await asyncio.to_thread(run_aider_overview, settings, mr_iid, workspace_path, diff_result, original_title)
+    if result is None:
+        return
+    title, description = result
+
+    # 4단계: MR 제목과 설명 교체
+    await asyncio.to_thread(change_mr_overview, settings, project_id, mr_iid, title, description)
+
+
 def route_webhook(payload: dict, settings, add_background_task: Callable) -> dict:
     """Webhook 이벤트를 라우팅한다. FastAPI를 직접 import하지 않아 테스트가 용이하다."""
     object_kind = payload.get("object_kind")
@@ -95,8 +134,17 @@ def route_webhook(payload: dict, settings, add_background_task: Callable) -> dic
         source_branch = mr_attributes.get("source_branch")
         target_branch = mr_attributes.get("target_branch", "main")
 
-        if action in ["open", "update"]:
-            logger.info(f"🚀 [MR #{mr_iid}] 코드 변경({action}) 감지. 자동 리뷰를 시작합니다.")
+        if action == "open":
+            mr_title = mr_attributes.get("title", "")
+            logger.info(f"🆕 [MR #{mr_iid}] MR 생성 감지. overview 보고서 작성을 시작합니다.")
+            add_background_task(
+                handle_overview_task,
+                settings, project_id, mr_iid, source_branch, target_branch, mr_title,
+            )
+            return {"status": "overview_queued"}
+
+        if action == "update":
+            logger.info(f"🔄 [MR #{mr_iid}] 코드 변경(update) 감지. 자동 리뷰를 시작합니다.")
             add_background_task(
                 handle_review_task,
                 settings, project_id, mr_iid, source_branch, target_branch,

@@ -11,11 +11,11 @@ class Settings(BaseSettings):
     gitlab_host: str
     project_path: str
     remote_llm_base_url: str
+    remote_llm_model: str
 
     # 선택 환경변수
     remote_llm_api_key: str = "dummy"
     workspace_base: str = "/tmp/aider_workspaces"
-    aider_model: str = "openai/Qwen/Qwen3-Coder-30B-A3B-Instruct"
     aider_timeout: int = 600  # 10분
     diff_max_chars: int = 10000
 

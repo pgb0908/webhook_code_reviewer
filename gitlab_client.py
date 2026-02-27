@@ -4,8 +4,24 @@ import requests
 logger = logging.getLogger(__name__)
 
 
-def change_mr_overview() -> None:
-    """GitLab의 overview를 bot이 수정함"""
+def change_mr_overview(settings, project_id: str, mr_iid: str, title: str, description: str) -> None:
+    """GitLab MR의 제목과 설명을 AI 생성 보고서로 교체한다."""
+    if not project_id or project_id == "None":
+        logger.error(f"❌ [MR #{mr_iid}] project_id가 누락되어 overview를 수정할 수 없습니다.")
+        return
+
+    url = f"{settings.gitlab_api_base}/projects/{project_id}/merge_requests/{mr_iid}"
+    logger.info(f"📡 [MR #{mr_iid}] MR overview 수정 시도: {url}")
+
+    headers = {"PRIVATE-TOKEN": settings.gitlab_token}
+    payload = {"title": title, "description": description}
+
+    try:
+        response = requests.put(url, headers=headers, json=payload, timeout=10)
+        response.raise_for_status()
+        logger.info(f"✅ [MR #{mr_iid}] MR overview 수정 성공")
+    except requests.RequestException as e:
+        logger.error(f"❌ [MR #{mr_iid}] overview 수정 실패 (URL: {url}): {str(e)}")
 
 
 def post_mr_comment(settings, project_id: str, mr_iid: str, message: str) -> None:
