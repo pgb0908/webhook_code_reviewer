@@ -1,0 +1,7 @@
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+requests>=2.31.0
+pydantic>=2.7.0
+pydantic-settings>=2.3.0
+python-dotenv>=1.0.0
+# aider-chat>=0.40.0  # 별도 설치
