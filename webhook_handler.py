@@ -1,16 +1,18 @@
 import asyncio
 import logging
+import os
 from typing import Callable, Optional
 
 from git_service import sync_repository, extract_diff
 from gitlab_client import change_mr_overview, post_mr_comment
-from review_service import run_aider_overview, run_aider_review
+from service.review_service import run_aider_overview
+from service.comment_service import run_aider_comment
 from workspace_manager import cleanup_workspace, get_workspace_path
 
 logger = logging.getLogger(__name__)
 
 
-async def handle_review_task(
+async def handle_comment_task(
     settings,
     project_id: str,
     mr_iid: str,
@@ -18,10 +20,10 @@ async def handle_review_task(
     target_branch: str,
     question: Optional[str] = None,
 ) -> None:
-    """4단계 파이프라인: sync → diff → review → comment
+    """코멘트 질의응답 파이프라인: (sync →) aider → comment
 
-    각 블로킹 호출을 asyncio.to_thread로 감싸 이벤트 루프를 블로킹하지 않는다.
-    여러 MR이 동시에 들어와도 각자 독립적으로 병렬 실행된다.
+    workspace가 이미 존재하면 sync를 건너뛴다.
+    @aider 멘션은 코드 변경이 없으므로 open 때 받아온 repo를 그대로 사용한다.
     """
     workspace_path = get_workspace_path(settings, mr_iid)
     logger.info(f"작업공간: {workspace_path}")
@@ -33,23 +35,22 @@ async def handle_review_task(
         )
         return
 
-    # 1단계: 저장소 동기화 (git subprocess — 스레드로 분리)
-    ok = await asyncio.to_thread(sync_repository, settings, workspace_path, mr_iid, source_branch)
-    if not ok:
+    # workspace가 없을 때(서버 재시작 등)만 clone
+    if not os.path.exists(os.path.join(workspace_path, ".git")):
+        logger.info(f"📥 [MR #{mr_iid}] workspace 없음. 저장소를 먼저 받아옵니다.")
+        ok = await asyncio.to_thread(sync_repository, settings, workspace_path, mr_iid, source_branch)
+        if not ok:
+            return
+    else:
+        logger.info(f"✅ [MR #{mr_iid}] 기존 workspace 재사용. sync 생략.")
+
+    # AI 응답 생성 (aider subprocess, 최대 10분 — 스레드로 분리)
+    response = await asyncio.to_thread(run_aider_comment, settings, mr_iid, workspace_path, question)
+    if response is None:
         return
 
-    # 2단계: Diff 추출 (git subprocess — 스레드로 분리)
-    diff_result = await asyncio.to_thread(extract_diff, settings, workspace_path, mr_iid, source_branch, target_branch)
-    if diff_result is None:
-        return
-
-    # 3단계: AI 리뷰 (aider subprocess, 최대 10분 — 스레드로 분리)
-    review = await asyncio.to_thread(run_aider_review, settings, mr_iid, workspace_path, diff_result, question)
-    if review is None:
-        return
-
-    # 4단계: GitLab 코멘트 전송 (HTTP 요청 — 스레드로 분리)
-    await asyncio.to_thread(post_mr_comment, settings, project_id, mr_iid, review)
+    # GitLab 코멘트 전송 (HTTP 요청 — 스레드로 분리)
+    await asyncio.to_thread(post_mr_comment, settings, project_id, mr_iid, response)
 
 
 async def handle_overview_task(
@@ -119,7 +120,7 @@ def route_webhook(payload: dict, settings, add_background_task: Callable) -> dic
 
         logger.info(f"🔔 [MR #{mr_iid}] 멘션 감지. 답변 생성을 시작합니다.")
         add_background_task(
-            handle_review_task,
+            handle_comment_task,
             settings, project_id, mr_iid, source_branch, target_branch, clean_question,
         )
         return {"status": "queued"}
@@ -143,13 +144,13 @@ def route_webhook(payload: dict, settings, add_background_task: Callable) -> dic
             )
             return {"status": "overview_queued"}
 
-        if action == "update":
-            logger.info(f"🔄 [MR #{mr_iid}] 코드 변경(update) 감지. 자동 리뷰를 시작합니다.")
-            add_background_task(
-                handle_review_task,
-                settings, project_id, mr_iid, source_branch, target_branch,
-            )
-            return {"status": "auto_review_queued"}
+        # if action == "update":
+        #     logger.info(f"🔄 [MR #{mr_iid}] 코드 변경(update) 감지. 자동 리뷰를 시작합니다.")
+        #     add_background_task(
+        #         handle_review_task,
+        #         settings, project_id, mr_iid, source_branch, target_branch,
+        #     )
+        #     return {"status": "auto_review_queued"}
 
         if state in ["closed", "merged"] or action in ["close", "merge"]:
             logger.info(f"🗑️ [MR #{mr_iid}] MR 종료 감지. 정리 작업을 시작합니다.")
