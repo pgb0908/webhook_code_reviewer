@@ -109,6 +109,12 @@ def route_webhook(payload: dict, settings, add_background_task: Callable) -> dic
         if not merge_request:
             return {"status": "ignored"}
 
+        # 봇 자신이 남긴 코멘트는 무시 (무한 루프 방지)
+        author_username = payload.get("user", {}).get("username", "")
+        if settings.bot_username and author_username == settings.bot_username:
+            logger.info(f"🤖 봇 자신의 코멘트 무시 (author: {author_username})")
+            return {"status": "ignored"}
+
         comment_text = payload.get("object_attributes", {}).get("note", "").lower()
         if "@aider" not in comment_text:
             return {"status": "ignored"}

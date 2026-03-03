@@ -34,7 +34,16 @@ def post_mr_comment(settings, project_id: str, mr_iid: str, message: str) -> Non
     logger.info(f"📡 [MR #{mr_iid}] 코멘트 전송 시도: {url}")
 
     headers = {"PRIVATE-TOKEN": settings.gitlab_token}
-    payload = {"body": f"🤖 **Aider AI 응답**\n\n{message}"}
+    body = (
+        "<details>\n"
+        "<summary>🤖 <strong>Aider AI 응답</strong> — 클릭하여 펼치기</summary>\n\n"
+        f"{message}\n\n"
+        "---\n"
+        "<sub>🤖 Aider AI Code Review Bot 자동 생성 · "
+        "멘션: <code>aider 질문내용</code></sub>\n"
+        "</details>"
+    )
+    payload = {"body": body}
 
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=10)

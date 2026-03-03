@@ -3,6 +3,7 @@ from typing import Optional
 
 from git_service import DiffResult, split_diff_into_chunks
 from service.common.aider_subprocess import _run_aider_subprocess
+from service.common.yaml_output import parse_yaml_safe, render_overview_markdown
 
 logger = logging.getLogger(__name__)
 
@@ -10,8 +11,8 @@ logger = logging.getLogger(__name__)
 def _build_overview_prompt(diff_result: DiffResult, original_title: str) -> str:
     return f"""[작업 지시]
 우리 팀 수석 SRE이자 C++ 백엔드 전문가로서, 아래 Merge Request diff를 분석하여
-정확히 지정된 형식으로만 MR 설명 문서를 작성하라.
-형식 외 인사말·부연 설명·지시 반복은 절대 출력하지 마라. 응답은 한글로.
+정확히 지정된 YAML 스키마로만 출력하라.
+YAML 펜스(```yaml ... ```) 외 인사말·부연 설명·지시 반복은 절대 출력하지 마라. 응답은 한글로.
 
 원래 MR 제목: {original_title}
 
@@ -20,35 +21,36 @@ def _build_overview_prompt(diff_result: DiffResult, original_title: str) -> str:
 {diff_result.content}
 ```
 
-[출력 형식 — < > 부분을 실제 내용으로 채울 것]
+[출력 형식 — ```yaml 펜스 안에 아래 스키마를 채워 출력할 것]
 
-TITLE: <동사로 시작, 40자 이내>
----
-> 🤖 이 설명은 Aider AI가 자동 생성했습니다.
+```yaml
+title: <동사로 시작, 40자 이내 — 반드시 한글로>
+summary: |
+  <이번 변경의 목적과 접근 방식. 왜 필요했는지 + 무엇을 어떻게 바꿨는지를 3~5문장으로 서술. 반드시 한글로>
+file_changes:
+  - file: <파일명>
+    change: <변경 내용 1문장 — 반드시 한글로>
+review_points:
+  - severity: critical  # critical | warning | suggestion
+    description: <문제 설명 — 반드시 한글로>
+    file: <해당 파일명, 없으면 생략>
+```
 
-## 📋 변경 개요
-<이번 변경의 목적과 접근 방식. 왜 필요했는지 + 무엇을 어떻게 바꿨는지를 3~5문장으로 서술>
-
-## 🔍 주요 변경 사항
-<변경된 파일·컴포넌트마다 한 항목씩. 형식: `번호. **파일명** — 변경 내용 1~2문장`>
-
-## ⚠️ 리뷰 포인트
-<잠재 버그·성능·메모리 우려사항·개선 제안을 불릿으로. 없으면 "특이사항 없음">
-
----
-*Aider AI Code Review Bot 자동 생성*
+모든 텍스트 값은 반드시 한글로 작성할 것. 영어 사용 금지.
 """
 
 
 def _build_chunk_analysis_prompt(chunk: str, chunk_index: int, total_chunks: int) -> str:
     return f"""[작업 지시]
 아래는 Merge Request diff의 일부({chunk_index}/{total_chunks} 청크)다.
-변경된 각 파일에 대해 아래 형식으로만 출력하라. 인사말·부연 없이.
+변경된 각 파일에 대해 아래 형식으로만 출력하라. 인사말·부연 없이. 응답은 한글로.
 
 형식:
 FILE: <파일명>
 CHANGES: <변경 내용 1~2문장>
-CONCERNS: <잠재 문제나 리뷰 포인트. 없으면 "없음">
+CONCERNS: <심각도 레이블 포함 문제 목록. 없으면 "없음">
+  심각도: 🔴 Critical | 🟡 Warning | 🟢 Suggestion
+  예시: 🔴 Critical — 메모리 해제 누락
 
 [Diff 청크]
 ```diff
@@ -63,35 +65,41 @@ def _build_aggregate_prompt(partial_analyses: list[str], original_title: str) ->
     )
     return f"""[작업 지시]
 우리 팀 수석 SRE이자 C++ 백엔드 전문가로서, 아래 청크별 분석을 종합하여
-정확히 지정된 형식으로만 MR 설명 문서를 작성하라.
-형식 외 인사말·부연 설명·지시 반복은 절대 출력하지 마라. 응답은 한글로.
+정확히 지정된 YAML 스키마로만 출력하라.
+YAML 펜스(```yaml ... ```) 외 인사말·부연 설명·지시 반복은 절대 출력하지 마라. 응답은 한글로.
 
 원래 MR 제목: {original_title}
 
 [청크별 분석]
 {combined}
 
-[출력 형식]
-TITLE: <동사로 시작, 40자 이내>
----
-> 🤖 이 설명은 Aider AI가 자동 생성했습니다.
+[출력 형식 — ```yaml 펜스 안에 아래 스키마를 채워 출력할 것]
 
-## 📋 변경 개요
-<목적과 접근 방식. 3~5문장>
+```yaml
+title: <동사로 시작, 40자 이내 — 반드시 한글로>
+summary: |
+  <목적과 접근 방식. 3~5문장 — 반드시 한글로>
+file_changes:
+  - file: <파일명>
+    change: <변경 내용 1문장 — 반드시 한글로>
+review_points:
+  - severity: critical  # critical | warning | suggestion
+    description: <문제 설명 — 반드시 한글로>
+    file: <해당 파일명, 없으면 생략>
+```
 
-## 🔍 주요 변경 사항
-<변경된 파일·컴포넌트마다 한 항목씩. 형식: `번호. **파일명** — 변경 내용 1~2문장`>
-
-## ⚠️ 리뷰 포인트
-<잠재 버그·성능·메모리 우려사항·개선 제안을 불릿으로. 없으면 "특이사항 없음">
-
----
-*Aider AI Code Review Bot 자동 생성*
+모든 텍스트 값은 반드시 한글로 작성할 것. 영어 사용 금지.
 """
 
 
 def parse_overview_output(raw: str) -> tuple[str, str]:
-    """aider 출력에서 TITLE과 description을 파싱한다."""
+    """aider 출력에서 YAML을 파싱하여 (title, description)을 반환한다."""
+    data = parse_yaml_safe(raw)
+    if data and "title" in data:
+        return render_overview_markdown(data)
+
+    # Fallback: 기존 TITLE: 파싱 로직 (하위 호환)
+    logger.warning("⚠️ parse_overview_output: YAML 파싱 실패, 레거시 TITLE: 파싱 시도")
     lines = raw.strip().splitlines()
     title = ""
     title_line_idx = -1
@@ -106,8 +114,6 @@ def parse_overview_output(raw: str) -> tuple[str, str]:
         logger.warning("⚠️ parse_overview_output: TITLE 포맷 감지 실패, fallback 사용")
         return "", raw
 
-    # TITLE 줄 직후 최대 3줄 안에서 --- 구분자 탐색
-    # --- 가 있으면 그 다음 줄부터, 없으면 TITLE 다음 줄부터 description
     desc_start = title_line_idx + 1
     for i in range(title_line_idx + 1, min(title_line_idx + 4, len(lines))):
         if lines[i].strip() == "---":
@@ -135,7 +141,8 @@ def run_aider_overview(
         raw = _run_aider_subprocess(settings, mr_iid, workspace_path, prompt)
         if raw is None:
             return None
-        return parse_overview_output(raw)
+        title, description = parse_overview_output(raw)
+        return title or original_title, description
 
     # Map: 청크별 분석
     partial_analyses = []
@@ -158,4 +165,5 @@ def run_aider_overview(
     raw = _run_aider_subprocess(settings, mr_iid, workspace_path, aggregate_prompt)
     if raw is None:
         return None
-    return parse_overview_output(raw)
+    title, description = parse_overview_output(raw)
+    return title or original_title, description
