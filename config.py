@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     workspace_base: str = "/tmp/aider_workspaces"
     aider_timeout: int = 600  # 10분
     diff_max_chars: int = 10000
+    diff_ignore_patterns: str = ""   # 추가 제외 패턴 (쉼표 구분 glob). 예: "*.sum,dist/*"
+    diff_omit_deletions: bool = True  # 삭제 전용 hunk 제거 여부
     bot_username: str = ""  # 봇 GitLab 계정명 (설정 시 봇 자신의 멘션 무시)
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
