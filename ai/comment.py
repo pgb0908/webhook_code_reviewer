@@ -1,8 +1,8 @@
 import logging
 from typing import Optional
 
-from service.common.aider_subprocess import _run_aider_subprocess
-from service.common.yaml_output import parse_yaml_safe, render_comment_markdown
+from ai.shared.subprocess import run_aider_subprocess
+from ai.shared.output import parse_yaml_safe, render_comment_markdown
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +48,6 @@ suggestions:
 
 
 def run_aider_comment(
-        settings,
         mr_iid: str,
         workspace_path: str,
         question: Optional[str],
@@ -56,7 +55,7 @@ def run_aider_comment(
     """Aider CLI를 실행하여 응답 텍스트를 반환한다. 실패 시 None."""
     logger.info(f"🧠 [MR #{mr_iid}] 질문에 대한 응답 생성 중...")
     prompt = _build_user_ask_prompt(question)
-    raw = _run_aider_subprocess(settings, mr_iid, workspace_path, prompt)
+    raw = run_aider_subprocess(mr_iid, workspace_path, prompt)
     if raw is None:
         return None
 

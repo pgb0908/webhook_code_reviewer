@@ -1,9 +1,10 @@
 import logging
 from typing import Optional
 
-from git_service import DiffResult, split_diff_into_chunks
-from service.common.aider_subprocess import _run_aider_subprocess
-from service.common.yaml_output import parse_yaml_safe, render_overview_markdown
+from config import settings
+from git.diff import DiffResult, split_diff_into_chunks
+from ai.shared.subprocess import run_aider_subprocess
+from ai.shared.output import parse_yaml_safe, render_overview_markdown
 
 logger = logging.getLogger(__name__)
 
@@ -125,7 +126,6 @@ def parse_overview_output(raw: str) -> tuple[str, str]:
 
 
 def run_aider_overview(
-        settings,
         mr_iid: str,
         workspace_path: str,
         diff_result: DiffResult,
@@ -138,7 +138,7 @@ def run_aider_overview(
     if len(chunks) == 1:
         # 단일 청크: 기존 플로우
         prompt = _build_overview_prompt(diff_result, original_title)
-        raw = _run_aider_subprocess(settings, mr_iid, workspace_path, prompt)
+        raw = run_aider_subprocess(mr_iid, workspace_path, prompt)
         if raw is None:
             return None
         title, description = parse_overview_output(raw)
@@ -149,7 +149,7 @@ def run_aider_overview(
     for idx, chunk in enumerate(chunks, 1):
         logger.info(f"🔍 [MR #{mr_iid}] 청크 {idx}/{len(chunks)} 분석 중...")
         prompt = _build_chunk_analysis_prompt(chunk, idx, len(chunks))
-        result = _run_aider_subprocess(settings, mr_iid, workspace_path, prompt)
+        result = run_aider_subprocess(mr_iid, workspace_path, prompt)
         if result:
             partial_analyses.append(result)
         else:
@@ -162,7 +162,7 @@ def run_aider_overview(
     # Reduce: 취합
     logger.info(f"📝 [MR #{mr_iid}] {len(partial_analyses)}개 청크 분석 취합 중...")
     aggregate_prompt = _build_aggregate_prompt(partial_analyses, original_title)
-    raw = _run_aider_subprocess(settings, mr_iid, workspace_path, aggregate_prompt)
+    raw = run_aider_subprocess(mr_iid, workspace_path, aggregate_prompt)
     if raw is None:
         return None
     title, description = parse_overview_output(raw)

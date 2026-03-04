@@ -4,6 +4,8 @@ import subprocess
 import logging
 from typing import Optional
 
+from config import settings
+
 logger = logging.getLogger(__name__)
 
 # ANSI 이스케이프 코드 제거용 정규식
@@ -81,7 +83,7 @@ def _extract_llm_response(text: str) -> str:
     return output
 
 
-def _run_aider_subprocess(settings, mr_iid: str, workspace_path: str, prompt: str) -> Optional[str]:
+def run_aider_subprocess(mr_iid: str, workspace_path: str, prompt: str) -> Optional[str]:
     """Aider CLI subprocess를 실행하고 정제된 stdout을 반환한다. 실패 시 None."""
     env = os.environ.copy()
     env["OPENAI_API_BASE"] = settings.remote_llm_base_url
