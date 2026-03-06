@@ -45,15 +45,15 @@ _PROGRESS_BAR = re.compile(r"\[[\s█░▓▒]+\]\s*\d+%")
 
 # 마크다운 정규화용 정규식
 _HEADING_RE = re.compile(r"(?<!\n)\n(#{1,3} )")
-_HEADING_TRAIL_RE = re.compile(r"(#{1,3} [^\n]+)\n(?!\n)")
+_HEADING_TRAIL_RE = re.compile(r"^(#{1,3} [^\n]+)\n(?!\n)", re.MULTILINE)
 
 
 def _normalize_markdown(text: str) -> str:
     """마크다운을 GitLab에서 깔끔하게 렌더링되도록 정규화한다."""
     lines = [line.rstrip() for line in text.splitlines()]
     output = "\n".join(lines)
-    # • 불릿 → 마크다운 - 불릿
-    output = re.sub(r"^•\s*", "- ", output, flags=re.MULTILINE)
+    # • 불릿 → 마크다운 - 불릿 (들여쓰기 보존)
+    output = re.sub(r"^(\s*)•\s*", r"\1- ", output, flags=re.MULTILINE)
     # heading 앞 빈줄 보장
     output = _HEADING_RE.sub(r"\n\n\1", output)
     # heading 뒤 빈줄 보장

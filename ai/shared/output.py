@@ -9,6 +9,9 @@ logger = logging.getLogger(__name__)
 _YAML_FENCE_RE = re.compile(r"```(?:yaml|YAML)\s*\n(.*?)```", re.DOTALL)
 _BLOCK_SCALAR_LINE_RE = re.compile(r"^(\s*)[\w\-]+\s*:\s*[|>][+\-]?\s*$")
 _YAML_KEY_LINE_RE = re.compile(r"^(\s*)[\w\-]+\s*:")
+_YAML_KEY_VALUE_RE = re.compile(r"^(\s*)([\w\-]+)\s*:\s*(.*)")
+_YAML_SEQ_LINE_RE = re.compile(r"^\s*-\s")
+_YAML_DOC_LINE_RE = re.compile(r"^(---|\.\.\.)$")
 
 _SEVERITY_EMOJI = {
     "critical": "🔴",
@@ -76,18 +79,88 @@ def _repair_yaml_block_scalars(text: str) -> str:
     return "\n".join(result)
 
 
+def _repair_wrapped_scalars(text: str) -> str:
+    """LLM이 plain scalar 값을 줄바꿈하여 들여쓰기 없이(col 0) 이어 쓴 경우를 수정한다.
+
+    예:
+        description: 긴 설명 텍스트가 줄바꿈되어
+경우에도 이어지는 텍스트입니다.
+        file: server.cpp
+
+    →   description: 긴 설명 텍스트가 줄바꿈되어 경우에도 이어지는 텍스트입니다.
+        file: server.cpp
+    """
+    lines = text.splitlines()
+    result = []
+    last_plain_value_indent = -1  # 마지막으로 plain scalar 값을 가진 키의 들여쓰기 수준
+
+    for line in lines:
+        stripped = line.rstrip()
+
+        if not stripped:
+            result.append(stripped)
+            last_plain_value_indent = -1
+            continue
+
+        current_indent = len(stripped) - len(stripped.lstrip())
+
+        # 이전 키보다 들여쓰기가 작고, 새로운 YAML 구조 요소가 아니면 → 이어쓰기 줄
+        if (last_plain_value_indent >= 0
+                and current_indent < last_plain_value_indent
+                and not _YAML_KEY_LINE_RE.match(stripped)
+                and not _YAML_SEQ_LINE_RE.match(stripped)
+                and not _YAML_DOC_LINE_RE.match(stripped)
+                and not stripped.lstrip().startswith("#")):
+            if result:
+                result[-1] = result[-1] + " " + stripped.lstrip()
+            continue  # last_plain_value_indent 유지 (연속 이어쓰기 지원)
+
+        result.append(stripped)
+
+        km = _YAML_KEY_VALUE_RE.match(stripped)
+        if km:
+            key_indent = len(km.group(1))
+            value = km.group(3).strip()
+            # block scalar(| >) 또는 값 없는 키는 이어쓰기 탐지 대상 아님
+            if value and not value[0] in ("|", ">", "{", "["):
+                last_plain_value_indent = key_indent
+            else:
+                last_plain_value_indent = -1
+        else:
+            last_plain_value_indent = -1
+
+    return "\n".join(result)
+
+
+_YAML_OPEN_FENCE_RE = re.compile(r"```(?:yaml|YAML)\s*\n(.*)", re.DOTALL)
+
+
 def extract_yaml_block(text: str) -> Optional[str]:
     """LLM 출력에서 YAML 블록을 추출한다.
 
     1순위: ```yaml ... ``` 펜스 탐색
-    2순위: 'title:' 또는 'conclusion:' 으로 시작하는 줄부터 끝까지 추출
+    2순위: 닫힌 펜스 없이 ```yaml 이후 끝까지 추출
+    3순위: 'title:' 또는 'conclusion:' 으로 시작하는 줄부터 끝까지 추출
     실패 시 None
     """
     match = _YAML_FENCE_RE.search(text)
     if match:
         return match.group(1).strip()
 
-    # 2순위: 최상위 YAML 키로 시작하는 줄 탐색
+    # 2순위: 닫힌 펜스 없이 열린 펜스만 있는 경우
+    open_match = _YAML_OPEN_FENCE_RE.search(text)
+    if open_match:
+        content = open_match.group(1)
+        lines = content.splitlines()
+        result = []
+        for line in lines:
+            if line.strip().startswith("```"):
+                break
+            result.append(line)
+        if result:
+            return "\n".join(result).strip()
+
+    # 3순위: 최상위 YAML 키로 시작하는 줄 탐색
     lines = text.splitlines()
     for i, line in enumerate(lines):
         stripped = line.strip()
@@ -99,6 +172,8 @@ def extract_yaml_block(text: str) -> Optional[str]:
 
 def parse_yaml_safe(text: str) -> Optional[dict]:
     """LLM 출력 텍스트에서 YAML을 파싱하여 dict를 반환한다. 실패 시 None."""
+    logger.debug(f"디버깅 텍스트: {text}")
+
     block = extract_yaml_block(text)
     if block is None:
         logger.warning("⚠️ parse_yaml_safe: YAML 블록을 찾지 못함")
@@ -112,18 +187,31 @@ def parse_yaml_safe(text: str) -> Optional[dict]:
     except yaml.YAMLError:
         pass
 
-    # 2차 시도: block scalar 들여쓰기 보정 후 재파싱
-    repaired = _repair_yaml_block_scalars(block)
+    # 2차 시도: wrapped scalar + block scalar 보정 후 재파싱
+    repaired = _repair_wrapped_scalars(_repair_yaml_block_scalars(block))
     try:
         data = yaml.safe_load(repaired)
         if isinstance(data, dict):
-            logger.info("ℹ️ parse_yaml_safe: block scalar 보정 후 파싱 성공")
+            logger.info("ℹ️ parse_yaml_safe: 보정 후 파싱 성공")
             return data
-        logger.warning(f"⚠️ parse_yaml_safe: YAML 파싱 결과가 dict가 아님 ({type(data).__name__})")
-        return None
-    except yaml.YAMLError as e:
-        logger.warning(f"⚠️ parse_yaml_safe: YAML 파싱 오류 — {e}")
-        return None
+    except yaml.YAMLError:
+        pass
+
+    # 3차 시도: 빈 줄 기준으로 뒤에서부터 잘라내며 재파싱
+    # (AI가 YAML 뒤에 영문 설명·중복 YAML을 추가했을 때 YAML 부분만 추출)
+    segments = re.split(r'\n\s*\n', repaired)
+    for n in range(len(segments) - 1, 0, -1):
+        truncated = '\n\n'.join(segments[:n])
+        try:
+            data = yaml.safe_load(truncated)
+            if isinstance(data, dict) and ("title" in data or "conclusion" in data):
+                logger.info(f"ℹ️ parse_yaml_safe: 후미 텍스트 제거 후 파싱 성공 (segments={n}/{len(segments)})")
+                return data
+        except yaml.YAMLError:
+            pass
+
+    logger.warning("⚠️ parse_yaml_safe: YAML 파싱 최종 실패\n--- block ---\n%s\n---", block)
+    return None
 
 
 def render_overview_markdown(data: dict) -> tuple[str, str]:

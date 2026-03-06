@@ -11,7 +11,9 @@ def _build_user_ask_prompt(question: Optional[str]) -> str:
     user_question = question if question else "이 Merge Request의 변경 사항에 대해 전반적인 코드 리뷰를 해줘."
 
     return f"""[역할]
-우리 팀 수석 SRE이자 C++ 백엔드 전문가. 아래 질문에 반드시 한글로만 답하라.
+우리 팀 수석 SRE이자 C++ 전문가.
+
+⚠️ 중요: 모든 텍스트 값을 반드시 한국어(한글)로만 작성하라. 영어 사용 절대 금지.
 
 [질문]
 {user_question}
@@ -28,22 +30,24 @@ def _build_user_ask_prompt(question: Optional[str]) -> str:
 [⚠️ 출력 규칙 — 반드시 준수]
 - 아래 ```yaml 펜스 하나만 출력한다
 - 펜스 밖에 설명·인사·부연을 절대 추가하지 않는다
-- conclusion, analysis, description 값은 반드시 한글로 작성한다
+- conclusion, analysis, description의 모든 값은 반드시 한국어(한글)로만 작성한다. 영어 금지.
 
 ```yaml
 conclusion: |
-  <결론 요약 1~3문장 — 반드시 한글로>
+  <결론 요약 1~3문장 — 반드시 한국어로>
 analysis: |
-  <상세 분석 — 반드시 한글로. 단순 질문이면 이 키 생략>
+  <상세 분석 — 반드시 한국어로. 단순 질문이면 이 키 생략>
 suggestions:
-  - severity: warning  # critical | warning | suggestion
-    description: <제안 설명 — 반드시 한글로>
+  - severity: warning
+    description: <제안 설명 — 반드시 한국어로>
     file: <파일명, 없으면 생략>
     before: |
       <기존 코드만. 설명 문장 금지>
     after: |
       <개선된 코드만. 설명 문장 금지>
 ```
+
+모든 텍스트 값(conclusion, analysis, description)은 한국어로 작성할 것. 영어 사용 금지.
 """
 
 
