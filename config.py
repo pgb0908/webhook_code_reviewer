@@ -6,6 +6,7 @@
 
 import logging
 import os
+from typing import Optional
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings
 
@@ -57,7 +58,7 @@ class Settings(BaseSettings):
     def gitlab_api_base(self) -> str:
         return f"http://{self.gitlab_host}/api/v4"
 
-    def get_token(self, project_id: str) -> str | None:
+    def get_token(self, project_id: str) -> Optional[str]:
         """프로젝트 ID에 해당하는 토큰을 반환한다. 없으면 None."""
         return self.project_tokens.get(str(project_id))
 
