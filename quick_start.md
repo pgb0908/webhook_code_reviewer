@@ -33,6 +33,9 @@ uv pip install aider-chat
 
 프로젝트 루트에 `.env` 파일을 생성합니다.
 
+GitLab 프로젝트 ID는 프로젝트 홈 > Settings > General 에서 확인
+![img.png](images/img.png)
+
 ```dotenv
 # GitLab 서버 주소 (http:// 또는 https:// 제외)
 GITLAB_HOST=gitlab.example.com
@@ -61,6 +64,9 @@ BOT_USERNAME=aider-bot
 6. 발급된 토큰을 `.env`의 `PROJECT_TOKEN_{project_id}` 에 입력
 
 > 프로젝트 ID는 GitLab 프로젝트 홈 화면 상단 프로젝트 이름 아래에 표시됩니다.
+
+![img_1.png](images/img_1.png)
+![img_2.png](images/img_2.png)
 
 ---
 
