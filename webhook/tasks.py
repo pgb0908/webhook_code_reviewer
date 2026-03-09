@@ -11,7 +11,7 @@ from typing import Optional
 
 from config import settings
 from git.sync import sync_repository
-from git.diff import extract_diff
+from git.diff import extract_diff, extract_incremental_diff
 from gitlab.client import change_mr_overview, post_mr_comment
 from ai.overview import run_aider_overview
 from ai.comment import run_aider_comment
@@ -116,3 +116,52 @@ async def handle_overview_task(
 
     # 4단계: MR 제목과 설명 교체
     await asyncio.to_thread(change_mr_overview, project_id, mr_iid, title, description, token)
+
+
+async def handle_push_review_task(
+    project_id: str,
+    project_path: str,
+    mr_iid: str,
+    source_branch: str,
+    oldrev: str,
+) -> None:
+    """push 감지 시 증분 코드리뷰: sync → 증분 diff → AI review → 코멘트 게시"""
+    if not source_branch or not project_id:
+        logger.error(f"❌ [MR #{mr_iid}] source_branch 혹은 project_id가 없습니다.")
+        return
+
+    token = settings.get_token(project_id)
+    if not token:
+        logger.error(
+            f"❌ [MR #{mr_iid}] No token for project_id={project_id}. "
+            f"Add PROJECT_TOKEN_{project_id}= to .env"
+        )
+        return
+    repo_url = settings.build_repo_url(token, project_path)
+
+    workspace_path = get_workspace_path(mr_iid, project_id, project_path)
+    logger.info(f"작업공간: {workspace_path}")
+
+    # 1단계: 최신 소스코드 동기화 (새 커밋 반영)
+    ok = await asyncio.to_thread(sync_repository, workspace_path, mr_iid, source_branch, repo_url)
+    if not ok:
+        return
+
+    # 2단계: 증분 diff 추출 (oldrev..HEAD)
+    diff_result = await asyncio.to_thread(extract_incremental_diff, workspace_path, mr_iid, oldrev)
+    if diff_result is None or not diff_result.content.strip():
+        logger.info(f"[MR #{mr_iid}] 증분 diff 없음. 코드리뷰 생략.")
+        return
+
+    # 3단계: AI 코드리뷰 생성 (기존 overview 함수 재사용)
+    result = await asyncio.to_thread(run_aider_overview, mr_iid, workspace_path, diff_result, "")
+    if result is None:
+        return
+    title, description = result
+
+    # 4단계: MR 코멘트로 게시
+    if title:
+        comment = f"## 📝 Push 코드리뷰\n**{title}**\n\n{description}"
+    else:
+        comment = f"## 📝 Push 코드리뷰\n\n{description}"
+    await asyncio.to_thread(post_mr_comment, project_id, mr_iid, comment, token)

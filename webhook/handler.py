@@ -10,7 +10,7 @@ import logging
 from fastapi import APIRouter, Request
 
 from config import settings
-from webhook.tasks import handle_overview_task, handle_comment_task
+from webhook.tasks import handle_overview_task, handle_comment_task, handle_push_review_task
 from workspace.manager import cleanup_workspace
 
 logger = logging.getLogger(__name__)
@@ -79,10 +79,13 @@ async def gitlab_webhook(request: Request) -> dict:
             _spawn(handle_overview_task(project_id, project_path, mr_iid, source_branch, target_branch, mr_title))
             return {"status": "overview_queued"}
 
-        # if action == "update":
-        #     logger.info(f"🔄 [MR #{mr_iid}] 코드 변경(update) 감지. 자동 리뷰를 시작합니다.")
-        #     _spawn(handle_overview_task(project_id, project_path, mr_iid, source_branch, target_branch, ""))
-        #     return {"status": "auto_review_queued"}
+        if action == "update":
+            oldrev = mr_attributes.get("oldrev")
+            if oldrev:
+                logger.info(f"🔄 [MR #{mr_iid}] 새 커밋 push 감지. 증분 코드리뷰를 시작합니다.")
+                _spawn(handle_push_review_task(project_id, project_path, mr_iid, source_branch, oldrev))
+                return {"status": "push_review_queued"}
+            return {"status": "ignored"}
 
         if state in ["closed", "merged"] or action in ["close", "merge"]:
             logger.info(f"🗑️ [MR #{mr_iid}] MR 종료 감지. 정리 작업을 시작합니다.")

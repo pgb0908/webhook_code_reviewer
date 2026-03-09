@@ -130,6 +130,17 @@ def _apply_omit_deletions(raw_diff: str) -> str:
 # Public API
 # ---------------------------------------------------------------------------
 
+def extract_changed_files(diff_content: str) -> list[str]:
+    """diff 내용에서 변경된 파일 경로 목록을 반환한다."""
+    file_diffs = _split_into_file_diffs(diff_content)
+    paths = []
+    for fd in file_diffs:
+        m = _DIFF_GIT_PATH_RE.match(fd)
+        if m:
+            paths.append(m.group(1))
+    return paths
+
+
 def split_diff_into_chunks(content: str, max_chars: int) -> list[str]:
     """git diff를 파일 경계(diff --git)로 분할하여 max_chars 이하 청크 리스트로 반환."""
     boundaries = [m.start() for m in _DIFF_FILE_HEADER.finditer(content)]
@@ -155,6 +166,30 @@ def split_diff_into_chunks(content: str, max_chars: int) -> list[str]:
     if current:
         chunks.append(current)
     return chunks
+
+
+def extract_incremental_diff(workspace_path: str, mr_iid: str, oldrev: str) -> Optional[DiffResult]:
+    """oldrev..HEAD 범위의 증분 diff를 추출한다. 실패 시 None 반환."""
+    try:
+        logger.info(f"🔍 [MR #{mr_iid}] 증분 diff 추출 중 ({oldrev[:8]}..HEAD)")
+        result = subprocess.run(
+            ["git", "diff", f"{oldrev}..HEAD"],
+            cwd=workspace_path, capture_output=True, text=True
+        )
+        content = result.stdout
+        if not content.strip():
+            logger.info(f"[MR #{mr_iid}] 증분 diff 없음 (빈 변경)")
+            return DiffResult(content="")
+        extra = [p.strip() for p in settings.diff_ignore_patterns.split(",") if p.strip()]
+        content, skipped = filter_file_diffs(content, extra)
+        if skipped:
+            logger.info(f"[MR #{mr_iid}] {skipped}개 파일 제외 (lock/binary/generated)")
+        if settings.diff_omit_deletions:
+            content = _apply_omit_deletions(content)
+        return DiffResult(content=content)
+    except Exception as e:
+        logger.error(f"⚠️ [MR #{mr_iid}] 증분 diff 추출 에러: {str(e)}")
+        return None
 
 
 def extract_diff(workspace_path: str, mr_iid: str, source_branch: str, target_branch: str) -> Optional[DiffResult]:

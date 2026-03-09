@@ -89,7 +89,12 @@ def _extract_llm_response(text: str) -> str:
     return output
 
 
-def run_aider_subprocess(mr_iid: str, workspace_path: str, prompt: str) -> Optional[str]:
+def run_aider_subprocess(
+    mr_iid: str,
+    workspace_path: str,
+    prompt: str,
+    file_paths: Optional[list[str]] = None,
+) -> Optional[str]:
     """Aider CLI subprocess를 실행하고 정제된 stdout을 반환한다. 실패 시 None."""
     env = os.environ.copy()
     env["OPENAI_API_BASE"] = settings.remote_llm_base_url
@@ -108,7 +113,16 @@ def run_aider_subprocess(mr_iid: str, workspace_path: str, prompt: str) -> Optio
         "--message", prompt,
     ]
 
-    logger.info(f"🚀 [MR #{mr_iid}] 실행 명령어: {' '.join(aider_command)}")
+    if file_paths:
+        for fp in file_paths:
+            full_path = os.path.join(workspace_path, fp)
+            if os.path.exists(full_path):
+                aider_command.extend(["--file", fp])
+            else:
+                logger.debug(f"[MR #{mr_iid}] --file 스킵 (없음): {fp}")
+
+    log_cmd = [a if prev != "--message" else "<prompt>" for prev, a in zip([""] + aider_command, aider_command)]
+    logger.info(f"🚀 [MR #{mr_iid}] 실행 명령어: {' '.join(log_cmd)}")
 
     try:
         process = subprocess.run(
