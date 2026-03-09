@@ -76,27 +76,27 @@ aider/
 ## 설치
 
 ```bash
-# 1. 의존성 설치
-pip install -r requirements.txt
+# 1. uv로 의존성 설치 (가상환경 자동 생성)
+uv sync
 
-# 2. Aider 설치 (별도)
-pip install aider-chat
+# 2. Aider 별도 설치
+uv pip install aider-chat
 
 # 3. 환경변수 설정
 cp .env.example .env
 # .env 파일 편집
 ```
 
+> `uv`가 없다면: `curl -LsSf https://astral.sh/uv/install.sh | sh`
+
 ## 실행
 
 ```bash
-python main.py
-```
+# 포그라운드
+uv run python main.py
 
-또는 uvicorn으로 직접 실행:
-
-```bash
-uvicorn main:app --host 0.0.0.0 --port 8000
+# 백그라운드 (터미널 종료 후에도 유지)
+nohup uv run python main.py > aider_bot.log 2>&1 &
 ```
 
 ## GitLab Webhook 설정

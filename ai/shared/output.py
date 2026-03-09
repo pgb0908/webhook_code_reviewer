@@ -296,10 +296,11 @@ def render_comment_markdown(data: dict) -> str:
                 line += f"\n`{file_ref}`"
             suggestion_parts.append(line)
 
-            if before:
-                suggestion_parts.append(f"\n**Before**\n```cpp\n{str(before).strip()}\n```")
-            if after:
-                suggestion_parts.append(f"**After**\n```cpp\n{str(after).strip()}\n```")
+            before_str = str(before).strip() if before else ""
+            after_str = str(after).strip() if after else ""
+            if before_str and after_str and before_str != after_str:
+                suggestion_parts.append(f"\n**Before**\n```cpp\n{before_str}\n```")
+                suggestion_parts.append(f"**After**\n```cpp\n{after_str}\n```")
 
         parts.append("\n".join(suggestion_parts))
 

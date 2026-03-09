@@ -44,6 +44,7 @@ conclusion: |
 analysis: |
   <상세 분석 — 반드시 한국어로. 단순 질문이면 이 키 생략>
 suggestions:
+  # 케이스 A — 코드 수정 제안이 명확할 때만 before/after 포함
   - severity: warning
     description: <제안 설명 — 반드시 한국어로>
     file: <파일명, 없으면 생략>
@@ -51,9 +52,14 @@ suggestions:
       <기존 코드만. 설명 문장 금지>
     after: |
       <개선된 코드만. 설명 문장 금지>
+  # 케이스 B — 코드 수정 없이 지적·안내만 필요할 때 before/after 생략
+  - severity: suggestion
+    description: <제안 설명 — 반드시 한국어로>
+    file: <파일명, 없으면 생략>
 ```
 
 모든 텍스트 값(conclusion, analysis, description)은 한국어로 작성할 것. 영어 사용 금지.
+`before`/`after`는 실제로 다른 코드로 수정할 수 있을 때만 포함한다. 내용이 동일하거나 변경이 불명확하면 생략한다.
 """
 
 
