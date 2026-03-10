@@ -18,6 +18,7 @@ _YAML_KEY_LINE_RE = re.compile(r"^(\s*)[\w\-]+\s*:")
 _YAML_KEY_VALUE_RE = re.compile(r"^(\s*)([\w\-]+)\s*:\s*(.*)")
 _YAML_SEQ_LINE_RE = re.compile(r"^\s*-\s")
 _YAML_DOC_LINE_RE = re.compile(r"^(---|\.\.\.)$")
+_PLAIN_SCALAR_COLON_RE = re.compile(r"^(\s*[\w\-]+\s*:\s*)(.+)$")
 
 _SEVERITY_EMOJI = {
     "critical": "🔴",
@@ -138,6 +139,28 @@ def _repair_wrapped_scalars(text: str) -> str:
     return "\n".join(result)
 
 
+def _quote_colon_in_plain_scalars(text: str) -> str:
+    """plain scalar 값에 ': ' 가 포함된 경우 YAML 파싱 오류를 방지하기 위해 큰따옴표로 감싼다.
+
+    YAML block context에서 plain scalar 안의 ': ' (콜론+공백)는 새 key-value 시작으로
+    해석되어 파싱이 깨진다. 예: '형식(예: 헤더, 쿠키 등)' → '"형식(예: 헤더, 쿠키 등)"'
+    block scalar(|, >), 이미 따옴표로 감싼 값, flow indicator({, [)는 건드리지 않는다.
+    """
+    lines = text.splitlines()
+    result = []
+    for line in lines:
+        m = _PLAIN_SCALAR_COLON_RE.match(line)
+        if m:
+            key_part = m.group(1)
+            value = m.group(2).strip()
+            if (": " in value or value.endswith(":")) and value[0] not in ("|", ">", '"', "'", "{", "["):
+                escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+                result.append(f'{key_part}"{escaped}"')
+                continue
+        result.append(line)
+    return "\n".join(result)
+
+
 _YAML_OPEN_FENCE_RE = re.compile(r"```(?:yaml|YAML)\s*\n(.*)", re.DOTALL)
 
 
@@ -203,9 +226,20 @@ def parse_yaml_safe(text: str) -> Optional[dict]:
     except yaml.YAMLError:
         pass
 
-    # 3차 시도: 빈 줄 기준으로 뒤에서부터 잘라내며 재파싱
+    # 3차 시도: plain scalar 내 ': ' 큰따옴표 이스케이프 후 재파싱
+    # 한국어 텍스트의 '예: 헤더' 같은 패턴이 YAML 키로 오해되는 문제 해결
+    quoted = _quote_colon_in_plain_scalars(repaired)
+    try:
+        data = yaml.safe_load(quoted)
+        if isinstance(data, dict):
+            logger.info("ℹ️ parse_yaml_safe: colon 이스케이프 후 파싱 성공")
+            return data
+    except yaml.YAMLError:
+        pass
+
+    # 4차 시도: 빈 줄 기준으로 뒤에서부터 잘라내며 재파싱
     # (AI가 YAML 뒤에 영문 설명·중복 YAML을 추가했을 때 YAML 부분만 추출)
-    segments = re.split(r'\n\s*\n', repaired)
+    segments = re.split(r'\n\s*\n', quoted)
     for n in range(len(segments) - 1, 0, -1):
         truncated = '\n\n'.join(segments[:n])
         try:
@@ -299,8 +333,9 @@ def render_comment_markdown(data: dict) -> str:
             before_str = str(before).strip() if before else ""
             after_str = str(after).strip() if after else ""
             if before_str and after_str and before_str != after_str:
-                suggestion_parts.append(f"\n**Before**\n```cpp\n{before_str}\n```")
-                suggestion_parts.append(f"**After**\n```cpp\n{after_str}\n```")
+                lang_fence = str(sg.get("language", "")).strip()
+                suggestion_parts.append(f"\n**Before**\n```{lang_fence}\n{before_str}\n```")
+                suggestion_parts.append(f"**After**\n```{lang_fence}\n{after_str}\n```")
 
         parts.append("\n".join(suggestion_parts))
 

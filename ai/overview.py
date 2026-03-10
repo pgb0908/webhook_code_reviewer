@@ -8,16 +8,17 @@ import logging
 from typing import Optional
 
 from config import settings
-from git.diff import DiffResult, split_diff_into_chunks, extract_changed_files
+from git.diff import DiffResult, split_diff_into_chunks, extract_changed_files, detect_primary_language
 from ai.shared.subprocess import run_aider_subprocess
 from ai.shared.output import parse_yaml_safe, render_overview_markdown
 
 logger = logging.getLogger(__name__)
 
 
-def _build_overview_prompt(diff_result: DiffResult, original_title: str) -> str:
+def _build_overview_prompt(diff_result: DiffResult, original_title: str, lang: str = "") -> str:
+    persona = f"{lang + ' ' if lang else ''}백엔드 전문가"
     return f"""[작업 지시]
-우리 팀 수석 SRE이자 C++ 백엔드 전문가로서, 아래 Merge Request diff를 분석하여
+우리 팀 수석 SRE이자 {persona}로서, 아래 Merge Request diff를 분석하여
 정확히 지정된 YAML 스키마로만 출력하라.
 YAML 펜스(```yaml ... ```) 외 인사말·부연 설명·지시 반복은 절대 출력하지 마라.
 
@@ -68,12 +69,13 @@ CONCERNS: <심각도 레이블 포함 문제 목록. 없으면 "없음">
 """
 
 
-def _build_aggregate_prompt(partial_analyses: list[str], original_title: str) -> str:
+def _build_aggregate_prompt(partial_analyses: list[str], original_title: str, lang: str = "") -> str:
     combined = "\n\n---\n\n".join(
         f"[청크 {i + 1}]\n{a}" for i, a in enumerate(partial_analyses)
     )
+    persona = f"{lang + ' ' if lang else ''}백엔드 전문가"
     return f"""[작업 지시]
-우리 팀 수석 SRE이자 C++ 백엔드 전문가로서, 아래 청크별 분석을 종합하여
+우리 팀 수석 SRE이자 {persona}로서, 아래 청크별 분석을 종합하여
 정확히 지정된 YAML 스키마로만 출력하라.
 YAML 펜스(```yaml ... ```) 외 인사말·부연 설명·지시 반복은 절대 출력하지 마라.
 
@@ -145,11 +147,15 @@ def run_aider_overview(
     chunks = split_diff_into_chunks(diff_result.content, settings.diff_max_chars)
     logger.info(f"🧠 [MR #{mr_iid}] diff 청크 수: {len(chunks)}")
 
+    all_file_paths = extract_changed_files(diff_result.content)
+    lang = detect_primary_language(all_file_paths)
+    if lang:
+        logger.info(f"🌐 [MR #{mr_iid}] 감지된 주요 언어: {lang}")
+
     if len(chunks) == 1:
         # 단일 청크: 기존 플로우
-        prompt = _build_overview_prompt(diff_result, original_title)
-        file_paths = extract_changed_files(diff_result.content)
-        raw = run_aider_subprocess(mr_iid, workspace_path, prompt, file_paths)
+        prompt = _build_overview_prompt(diff_result, original_title, lang)
+        raw = run_aider_subprocess(mr_iid, workspace_path, prompt)
         if raw is None:
             return None
         title, description = parse_overview_output(raw)
@@ -160,8 +166,7 @@ def run_aider_overview(
     for idx, chunk in enumerate(chunks, 1):
         logger.info(f"🔍 [MR #{mr_iid}] 청크 {idx}/{len(chunks)} 분석 중...")
         prompt = _build_chunk_analysis_prompt(chunk, idx, len(chunks))
-        chunk_files = extract_changed_files(chunk)
-        result = run_aider_subprocess(mr_iid, workspace_path, prompt, chunk_files)
+        result = run_aider_subprocess(mr_iid, workspace_path, prompt)
         if result:
             partial_analyses.append(result)
         else:
@@ -173,9 +178,8 @@ def run_aider_overview(
 
     # Reduce: 취합
     logger.info(f"📝 [MR #{mr_iid}] {len(partial_analyses)}개 청크 분석 취합 중...")
-    aggregate_prompt = _build_aggregate_prompt(partial_analyses, original_title)
-    all_files = extract_changed_files(diff_result.content)
-    raw = run_aider_subprocess(mr_iid, workspace_path, aggregate_prompt, all_files)
+    aggregate_prompt = _build_aggregate_prompt(partial_analyses, original_title, lang)
+    raw = run_aider_subprocess(mr_iid, workspace_path, aggregate_prompt)
     if raw is None:
         return None
     title, description = parse_overview_output(raw)

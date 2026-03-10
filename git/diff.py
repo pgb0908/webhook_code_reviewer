@@ -4,14 +4,34 @@
 # This software is the confidential and proprietary information of TmaxSoft Co., Ltd. ("Confidential Information").
 # You shall not disclose such Confidential Information and shall use it only in accordance with the terms of the license agreement you entered into with TmaxSoft Co., Ltd.
 
+import os
 import re
 import logging
 import subprocess
+from collections import Counter
 from dataclasses import dataclass
 from fnmatch import fnmatch
 from typing import Optional
 
 from config import settings
+
+_EXT_TO_LANG: dict[str, str] = {
+    ".cpp": "cpp", ".cc": "cpp", ".cxx": "cpp", ".c": "c",
+    ".h": "cpp", ".hpp": "cpp",
+    ".java": "java",
+    ".py": "python",
+    ".go": "go",
+    ".ts": "typescript", ".tsx": "typescript",
+    ".js": "javascript", ".jsx": "javascript",
+    ".rs": "rust",
+    ".kt": "kotlin", ".kts": "kotlin",
+    ".cs": "csharp",
+    ".rb": "ruby",
+    ".php": "php",
+    ".swift": "swift",
+    ".scala": "scala",
+    ".sh": "bash",
+}
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +149,16 @@ def _apply_omit_deletions(raw_diff: str) -> str:
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+def detect_primary_language(file_paths: list[str]) -> str:
+    """파일 경로 목록에서 가장 많이 등장하는 언어를 반환한다. 알 수 없으면 빈 문자열."""
+    counts: Counter = Counter()
+    for path in file_paths:
+        ext = os.path.splitext(path)[1].lower()
+        if ext in _EXT_TO_LANG:
+            counts[_EXT_TO_LANG[ext]] += 1
+    return counts.most_common(1)[0][0] if counts else ""
+
 
 def extract_changed_files(diff_content: str) -> list[str]:
     """diff 내용에서 변경된 파일 경로 목록을 반환한다."""

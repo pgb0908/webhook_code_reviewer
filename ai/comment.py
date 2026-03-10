@@ -17,7 +17,7 @@ def _build_user_ask_prompt(question: Optional[str]) -> str:
     user_question = question if question else "이 Merge Request의 변경 사항에 대해 전반적인 코드 리뷰를 해줘."
 
     return f"""[역할]
-우리 팀 수석 SRE이자 C++ 전문가.
+우리 팀 수석 SRE이자 백엔드 전문가.
 
 ⚠️ 중요: 모든 텍스트 값을 반드시 한국어(한글)로만 작성하라. 영어 사용 절대 금지.
 
@@ -27,8 +27,9 @@ def _build_user_ask_prompt(question: Optional[str]) -> str:
 [답변 규칙]
 - 결론부터 시작한다 (질문 반복 금지)
 - Repo Map의 실제 파일명·함수명을 근거로 인용한다
-- 코드 예시는 cpp 블록 사용, 수정 제안은 before/after로 표현한다
+- 수정 제안은 before/after로 표현한다
 - before/after 필드에는 순수 코드만 넣는다. 설명 문장 혼입 금지
+- language 필드는 코드 블록 언어를 명시한다 (java, python, cpp 등)
 - 리뷰 포인트 심각도: critical | warning | suggestion
 - 확실하지 않으면 "(추측)" 명시
 - 코드를 직접 수정하지 말고 제안만 한다
@@ -48,6 +49,7 @@ suggestions:
   - severity: warning
     description: <제안 설명 — 반드시 한국어로>
     file: <파일명, 없으면 생략>
+    language: <before/after 코드의 언어 식별자 (예: java, python, cpp). 코드가 없으면 생략>
     before: |
       <기존 코드만. 설명 문장 금지>
     after: |
