@@ -19,6 +19,18 @@ _YAML_KEY_VALUE_RE = re.compile(r"^(\s*)([\w\-]+)\s*:\s*(.*)")
 _YAML_SEQ_LINE_RE = re.compile(r"^\s*-\s")
 _YAML_DOC_LINE_RE = re.compile(r"^(---|\.\.\.)$")
 _PLAIN_SCALAR_COLON_RE = re.compile(r"^(\s*[\w\-]+\s*:\s*)(.+)$")
+_SEQ_ITEM_KV_RE = re.compile(r"^(\s*-\s+)([\w\-]+\s*:\s*)(.+)$")
+
+# aider 메타 라인 패턴 (raw 폴백 정리용)
+_AIDER_META_LINE = re.compile(
+    r"^(Aider v|Model:|Git repo:|Repo-map:|Added |Tokens:|Applied edit to|"
+    r"Only \d+ reflections|Summarization failed|can't summarize|"
+    r"Auto-committing|Warning:|No changes made|"
+    r"[A-Za-z0-9_./-]+\.[a-zA-Z]{1,5}\s+[A-Z]|"
+    r"[A-Za-z0-9_./-]+\.[a-zA-Z]{1,5}\s*$"
+    r")",
+    re.IGNORECASE | re.MULTILINE,
+)
 
 _SEVERITY_EMOJI = {
     "critical": "🔴",
@@ -139,26 +151,122 @@ def _repair_wrapped_scalars(text: str) -> str:
     return "\n".join(result)
 
 
+def _repair_block_scalar_code(text: str) -> str:
+    """before/after 블록 스칼라의 코드 내용을 double-quoted 스칼라로 변환한다.
+
+    코드에 포함된 YAML 특수문자(:, {, [, #, ---)로 인한 파싱 실패를 방지한다.
+    before/after 키에만 적용하고, summary 등 일반 텍스트 블록에는 적용하지 않는다.
+    """
+    lines = text.splitlines()
+    result = []
+    in_code_block = False
+    code_key_indent = 0
+    code_lines: list[str] = []
+    code_key_prefix = ""
+
+    def _flush_code_block():
+        """수집된 코드 줄을 double-quoted 스칼라로 변환하여 result에 추가."""
+        if not code_lines:
+            result.append(code_key_prefix + '""')
+            return
+        merged = "\\n".join(code_lines)
+        escaped = merged.replace("\\", "\\\\").replace('"', '\\"')
+        # 이미 \\n으로 변환한 줄바꿈은 보존
+        escaped = escaped.replace("\\\\n", "\\n")
+        result.append(f'{code_key_prefix}"{escaped}"')
+
+    for line in lines:
+        stripped = line.strip()
+
+        if in_code_block:
+            if not stripped:
+                code_lines.append("")
+                continue
+
+            current_indent = len(line) - len(line.lstrip())
+            key_match = _YAML_KEY_LINE_RE.match(line)
+
+            if key_match and len(key_match.group(1)) <= code_key_indent:
+                # 새 키가 같거나 상위 레벨 → 블록 종료
+                _flush_code_block()
+                in_code_block = False
+                code_lines = []
+                # 현재 줄을 다시 처리
+            elif current_indent > code_key_indent:
+                code_lines.append(stripped)
+                continue
+            else:
+                # 들여쓰기가 부족한 비-키 줄 → 블록 종료
+                _flush_code_block()
+                in_code_block = False
+                code_lines = []
+
+        # before:/after: 블록 스칼라 감지
+        m = _BLOCK_SCALAR_LINE_RE.match(line)
+        if m:
+            kv = _YAML_KEY_VALUE_RE.match(line)
+            if kv and kv.group(2) in ("before", "after"):
+                code_key_indent = len(kv.group(1))
+                code_key_prefix = kv.group(1) + kv.group(2) + ": "
+                in_code_block = True
+                code_lines = []
+                continue
+
+        result.append(line)
+
+    if in_code_block:
+        _flush_code_block()
+
+    return "\n".join(result)
+
+
 def _quote_colon_in_plain_scalars(text: str) -> str:
     """plain scalar 값에 ': ' 가 포함된 경우 YAML 파싱 오류를 방지하기 위해 큰따옴표로 감싼다.
 
     YAML block context에서 plain scalar 안의 ': ' (콜론+공백)는 새 key-value 시작으로
     해석되어 파싱이 깨진다. 예: '형식(예: 헤더, 쿠키 등)' → '"형식(예: 헤더, 쿠키 등)"'
     block scalar(|, >), 이미 따옴표로 감싼 값, flow indicator({, [)는 건드리지 않는다.
+
+    시퀀스 아이템 내 key-value 패턴(`- severity: ...`)과
+    한국어 뒤 콜론(공백 없음) 패턴도 처리한다.
     """
     lines = text.splitlines()
     result = []
     for line in lines:
+        # 일반 key: value 패턴
         m = _PLAIN_SCALAR_COLON_RE.match(line)
         if m:
             key_part = m.group(1)
             value = m.group(2).strip()
-            if (": " in value or value.endswith(":")) and value[0] not in ("|", ">", '"', "'", "{", "["):
+            if _needs_quoting(value):
                 escaped = value.replace("\\", "\\\\").replace('"', '\\"')
                 result.append(f'{key_part}"{escaped}"')
                 continue
+        # 시퀀스 아이템 내 key: value 패턴 (- severity: ...)
+        sm = _SEQ_ITEM_KV_RE.match(line)
+        if sm:
+            seq_prefix = sm.group(1)
+            kv_key = sm.group(2)
+            value = sm.group(3).strip()
+            if _needs_quoting(value):
+                escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+                result.append(f'{seq_prefix}{kv_key}"{escaped}"')
+                continue
         result.append(line)
     return "\n".join(result)
+
+
+def _needs_quoting(value: str) -> bool:
+    """값에 따옴표가 필요한지 판단한다."""
+    if not value or value[0] in ("|", ">", '"', "'", "{", "["):
+        return False
+    # 콜론+공백 또는 끝 콜론
+    if ": " in value or value.endswith(":"):
+        return True
+    # 한국어 뒤 콜론 (공백 없음): 예: [가-힣]:
+    if re.search(r"[\uac00-\ud7a3]:", value):
+        return True
+    return False
 
 
 _YAML_OPEN_FENCE_RE = re.compile(r"```(?:yaml|YAML)\s*\n(.*)", re.DOTALL)
@@ -199,13 +307,111 @@ def extract_yaml_block(text: str) -> Optional[str]:
     return None
 
 
-def parse_yaml_safe(text: str) -> Optional[dict]:
-    """LLM 출력 텍스트에서 YAML을 파싱하여 dict를 반환한다. 실패 시 None."""
+def _extract_fields_by_regex(text: str, schema: str) -> Optional[dict]:
+    """YAML 파싱이 완전히 실패했을 때 정규식으로 개별 필드를 추출하여 partial dict를 반환한다."""
+    result: dict = {}
+
+    if schema == "overview":
+        # title
+        m = re.search(r"^title\s*:\s*(.+)", text, re.MULTILINE)
+        if m:
+            result["title"] = m.group(1).strip().strip('"').strip("'")
+        # summary (block scalar 또는 plain)
+        m = re.search(r"^summary\s*:\s*\|?\s*\n((?:[ \t]+.+\n?)+)", text, re.MULTILINE)
+        if m:
+            result["summary"] = "\n".join(l.strip() for l in m.group(1).splitlines()).strip()
+        elif not result.get("summary"):
+            m2 = re.search(r"^summary\s*:\s*(.+)", text, re.MULTILINE)
+            if m2:
+                result["summary"] = m2.group(1).strip().strip('"').strip("'")
+        # file_changes
+        fc_items = re.findall(r"-\s*file\s*:\s*(.+)\n\s*change\s*:\s*(.+)", text)
+        if fc_items:
+            result["file_changes"] = [{"file": f.strip(), "change": c.strip()} for f, c in fc_items]
+        # review_points
+        rp_items = re.findall(r"-\s*severity\s*:\s*(.+)\n\s*description\s*:\s*(.+?)(?:\n\s*file\s*:\s*(.+))?(?:\n|$)", text)
+        if rp_items:
+            result["review_points"] = []
+            for sev, desc, fref in rp_items:
+                rp: dict = {"severity": sev.strip(), "description": desc.strip()}
+                if fref and fref.strip():
+                    rp["file"] = fref.strip()
+                result["review_points"].append(rp)
+
+    elif schema == "comment":
+        # conclusion
+        m = re.search(r"^conclusion\s*:\s*\|?\s*\n((?:[ \t]+.+\n?)+)", text, re.MULTILINE)
+        if m:
+            result["conclusion"] = "\n".join(l.strip() for l in m.group(1).splitlines()).strip()
+        else:
+            m2 = re.search(r"^conclusion\s*:\s*(.+)", text, re.MULTILINE)
+            if m2:
+                result["conclusion"] = m2.group(1).strip().strip('"').strip("'")
+        # analysis
+        m = re.search(r"^analysis\s*:\s*\|?\s*\n((?:[ \t]+.+\n?)+)", text, re.MULTILINE)
+        if m:
+            result["analysis"] = "\n".join(l.strip() for l in m.group(1).splitlines()).strip()
+        else:
+            m2 = re.search(r"^analysis\s*:\s*(.+)", text, re.MULTILINE)
+            if m2:
+                result["analysis"] = m2.group(1).strip().strip('"').strip("'")
+        # suggestions (severity + description only, no before/after)
+        sg_items = re.findall(r"-\s*severity\s*:\s*(.+)\n\s*description\s*:\s*(.+?)(?:\n\s*file\s*:\s*(.+))?(?:\n|$)", text)
+        if sg_items:
+            result["suggestions"] = []
+            for sev, desc, fref in sg_items:
+                sg: dict = {"severity": sev.strip(), "description": desc.strip()}
+                if fref and fref.strip():
+                    sg["file"] = fref.strip()
+                result["suggestions"].append(sg)
+
+    if not result:
+        return None
+    logger.info(f"ℹ️ _extract_fields_by_regex: {schema} 스키마에서 {list(result.keys())} 필드 추출 성공")
+    return result
+
+
+def render_raw_fallback(raw: str) -> str:
+    """모든 파싱이 실패했을 때 최소한 깨끗한 마크다운을 생성한다."""
+    lines = raw.splitlines()
+    cleaned = []
+    for line in lines:
+        stripped = line.strip()
+        # aider 메타 라인 제거
+        if _AIDER_META_LINE.match(stripped):
+            continue
+        cleaned.append(line)
+
+    text = "\n".join(cleaned)
+
+    # 닫히지 않은 코드 펜스 자동 닫기
+    fence_count = text.count("```")
+    if fence_count % 2 == 1:
+        text += "\n```"
+
+    # 과도한 빈 줄 정리 (3줄 이상 → 2줄)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = text.strip()
+
+    header = "> ⚠️ AI 응답을 구조화하지 못했습니다.\n"
+    return header + "\n" + text if text else header
+
+
+def parse_yaml_safe(text: str, schema: Optional[str] = None) -> Optional[dict]:
+    """LLM 출력 텍스트에서 YAML을 파싱하여 dict를 반환한다. 실패 시 None.
+
+    Args:
+        text: LLM 원본 출력 텍스트
+        schema: regex 폴백 시 사용할 스키마 ("overview" | "comment", optional)
+    """
     logger.debug(f"디버깅 텍스트: {text}")
 
     block = extract_yaml_block(text)
     if block is None:
         logger.warning("⚠️ parse_yaml_safe: YAML 블록을 찾지 못함")
+        # regex 폴백 시도
+        if schema:
+            return _extract_fields_by_regex(text, schema)
         return None
 
     # 1차 시도: 원본 그대로 파싱
@@ -226,9 +432,18 @@ def parse_yaml_safe(text: str) -> Optional[dict]:
     except yaml.YAMLError:
         pass
 
-    # 3차 시도: plain scalar 내 ': ' 큰따옴표 이스케이프 후 재파싱
-    # 한국어 텍스트의 '예: 헤더' 같은 패턴이 YAML 키로 오해되는 문제 해결
-    quoted = _quote_colon_in_plain_scalars(repaired)
+    # 3차 시도: before/after 코드 블록을 quoted 스칼라로 변환 후 재파싱
+    code_repaired = _repair_block_scalar_code(repaired)
+    try:
+        data = yaml.safe_load(code_repaired)
+        if isinstance(data, dict):
+            logger.info("ℹ️ parse_yaml_safe: 코드 블록 quoted 변환 후 파싱 성공")
+            return data
+    except yaml.YAMLError:
+        pass
+
+    # 4차 시도: plain scalar 내 ': ' 큰따옴표 이스케이프 후 재파싱
+    quoted = _quote_colon_in_plain_scalars(code_repaired)
     try:
         data = yaml.safe_load(quoted)
         if isinstance(data, dict):
@@ -237,8 +452,7 @@ def parse_yaml_safe(text: str) -> Optional[dict]:
     except yaml.YAMLError:
         pass
 
-    # 4차 시도: 빈 줄 기준으로 뒤에서부터 잘라내며 재파싱
-    # (AI가 YAML 뒤에 영문 설명·중복 YAML을 추가했을 때 YAML 부분만 추출)
+    # 5차 시도: 빈 줄 기준으로 뒤에서부터 잘라내며 재파싱
     segments = re.split(r'\n\s*\n', quoted)
     for n in range(len(segments) - 1, 0, -1):
         truncated = '\n\n'.join(segments[:n])
@@ -249,6 +463,12 @@ def parse_yaml_safe(text: str) -> Optional[dict]:
                 return data
         except yaml.YAMLError:
             pass
+
+    # 6차 시도: regex 기반 필드 추출
+    if schema:
+        regex_result = _extract_fields_by_regex(block, schema)
+        if regex_result:
+            return regex_result
 
     logger.warning("⚠️ parse_yaml_safe: YAML 파싱 최종 실패\n--- block ---\n%s\n---", block)
     return None

@@ -10,7 +10,7 @@ from typing import Optional
 from config import settings
 from git.diff import DiffResult, split_diff_into_chunks, extract_changed_files, detect_primary_language
 from ai.shared.subprocess import run_aider_subprocess
-from ai.shared.output import parse_yaml_safe, render_overview_markdown
+from ai.shared.output import parse_yaml_safe, render_overview_markdown, render_raw_fallback
 
 logger = logging.getLogger(__name__)
 
@@ -21,8 +21,10 @@ def _build_overview_prompt(diff_result: DiffResult, original_title: str, lang: s
 우리 팀 수석 SRE이자 {persona}로서, 아래 Merge Request diff를 분석하여
 정확히 지정된 YAML 스키마로만 출력하라.
 YAML 펜스(```yaml ... ```) 외 인사말·부연 설명·지시 반복은 절대 출력하지 마라.
+⚠️ YAML 펜스 밖에 텍스트를 출력하면 파싱이 실패한다. 절대 추가하지 마라.
 
 ⚠️ 중요: 모든 텍스트 값을 반드시 한국어(한글)로만 작성하라. 영어 사용 절대 금지.
+⚠️ 값에 콜론(:)이 포함되면 큰따옴표로 감싸라 (예: change: "인증 방식 변경(예: JWT)")
 
 원래 MR 제목: {original_title}
 
@@ -39,10 +41,10 @@ summary: |
   <이번 변경의 목적과 접근 방식. 왜 필요했는지 + 무엇을 어떻게 바꿨는지를 3~5문장으로 서술. 반드시 한국어로>
 file_changes:
   - file: <파일명>
-    change: <변경 내용 1문장 — 반드시 한국어로>
+    change: <변경 내용 1문장 — 반드시 한국어로. 콜론 포함 시 큰따옴표 사용>
 review_points:
   - severity: critical
-    description: <문제 설명 — 반드시 한국어로>
+    description: <문제 설명 — 반드시 한국어로. 콜론 포함 시 큰따옴표 사용>
     file: <해당 파일명, 없으면 생략>
 ```
 
@@ -78,8 +80,10 @@ def _build_aggregate_prompt(partial_analyses: list[str], original_title: str, la
 우리 팀 수석 SRE이자 {persona}로서, 아래 청크별 분석을 종합하여
 정확히 지정된 YAML 스키마로만 출력하라.
 YAML 펜스(```yaml ... ```) 외 인사말·부연 설명·지시 반복은 절대 출력하지 마라.
+⚠️ YAML 펜스 밖에 텍스트를 출력하면 파싱이 실패한다. 절대 추가하지 마라.
 
 ⚠️ 중요: 모든 텍스트 값을 반드시 한국어(한글)로만 작성하라. 영어 사용 절대 금지.
+⚠️ 값에 콜론(:)이 포함되면 큰따옴표로 감싸라 (예: description: "예: 메모리 누수")
 
 원래 MR 제목: {original_title}
 
@@ -94,10 +98,10 @@ summary: |
   <목적과 접근 방식. 3~5문장 — 반드시 한국어로>
 file_changes:
   - file: <파일명>
-    change: <변경 내용 1문장 — 반드시 한국어로>
+    change: <변경 내용 1문장 — 반드시 한국어로. 콜론 포함 시 큰따옴표 사용>
 review_points:
   - severity: critical
-    description: <문제 설명 — 반드시 한국어로>
+    description: <문제 설명 — 반드시 한국어로. 콜론 포함 시 큰따옴표 사용>
     file: <해당 파일명, 없으면 생략>
 ```
 
@@ -107,7 +111,7 @@ review_points:
 
 def parse_overview_output(raw: str) -> tuple[str, str]:
     """aider 출력에서 YAML을 파싱하여 (title, description)을 반환한다."""
-    data = parse_yaml_safe(raw)
+    data = parse_yaml_safe(raw, schema="overview")
     if data and "title" in data:
         return render_overview_markdown(data)
 
@@ -125,7 +129,7 @@ def parse_overview_output(raw: str) -> tuple[str, str]:
 
     if not title:
         logger.warning("⚠️ parse_overview_output: TITLE 포맷 감지 실패, fallback 사용")
-        return "", raw
+        return "", render_raw_fallback(raw)
 
     desc_start = title_line_idx + 1
     for i in range(title_line_idx + 1, min(title_line_idx + 4, len(lines))):
