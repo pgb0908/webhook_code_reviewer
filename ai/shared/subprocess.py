@@ -107,6 +107,7 @@ def run_aider_subprocess(
         "--no-auto-commits",
         "--no-gitignore",
         "--no-show-model-warnings",
+        "--no-check-update",    # 자동 pip 업그레이드 방지
         "--chat-mode", "ask",   # 파일 수정 없이 질의응답만
         "--exit",
         "--yes",
@@ -126,6 +127,7 @@ def run_aider_subprocess(
             aider_command,
             cwd=workspace_path,
             env=env,
+            stdin=subprocess.DEVNULL,   # 터미널 상속 차단 → sudo 등 대화형 프롬프트 방지
             capture_output=True,
             text=True,
             timeout=settings.aider_timeout,
