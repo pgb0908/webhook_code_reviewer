@@ -8,7 +8,7 @@ import logging
 from typing import Optional
 
 from config import settings
-from git.diff import DiffResult, split_diff_into_chunks, extract_changed_files, detect_primary_language
+from git.diff import DiffResult, split_diff_into_chunks, extract_changed_files, detect_primary_language, rank_changed_files
 from ai.shared.subprocess import run_aider_subprocess
 from ai.shared.output import parse_yaml_safe, render_overview_markdown, render_raw_fallback
 
@@ -159,7 +159,7 @@ def run_aider_overview(
     if len(chunks) == 1:
         # 단일 청크: 기존 플로우
         prompt = _build_overview_prompt(diff_result, original_title, lang)
-        raw = run_aider_subprocess(mr_iid, workspace_path, prompt)
+        raw = run_aider_subprocess(mr_iid, workspace_path, prompt, files=rank_changed_files(diff_result.content))
         if raw is None:
             return None
         title, description = parse_overview_output(raw)
@@ -170,7 +170,7 @@ def run_aider_overview(
     for idx, chunk in enumerate(chunks, 1):
         logger.info(f"🔍 [MR #{mr_iid}] 청크 {idx}/{len(chunks)} 분석 중...")
         prompt = _build_chunk_analysis_prompt(chunk, idx, len(chunks))
-        result = run_aider_subprocess(mr_iid, workspace_path, prompt)
+        result = run_aider_subprocess(mr_iid, workspace_path, prompt, files=extract_changed_files(chunk))
         if result:
             partial_analyses.append(result)
         else:
@@ -183,7 +183,7 @@ def run_aider_overview(
     # Reduce: 취합
     logger.info(f"📝 [MR #{mr_iid}] {len(partial_analyses)}개 청크 분석 취합 중...")
     aggregate_prompt = _build_aggregate_prompt(partial_analyses, original_title, lang)
-    raw = run_aider_subprocess(mr_iid, workspace_path, aggregate_prompt)
+    raw = run_aider_subprocess(mr_iid, workspace_path, aggregate_prompt, files=rank_changed_files(diff_result.content))
     if raw is None:
         return None
     title, description = parse_overview_output(raw)

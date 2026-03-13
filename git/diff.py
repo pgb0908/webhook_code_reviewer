@@ -198,6 +198,50 @@ def split_diff_into_chunks(content: str, max_chars: int) -> list[str]:
     return chunks
 
 
+_SIMILARITY_RE = re.compile(r"similarity index (\d+)%")
+
+_MAX_CONTEXT_FILES = 10
+
+
+def rank_changed_files(diff_content: str, max_files: int = _MAX_CONTEXT_FILES) -> list[str]:
+    """diff에서 실질적 변경이 큰 파일 순으로 상위 max_files개 경로를 반환한다.
+
+    제외 대상:
+    - similarity index >= 80% (rename/move)
+    - _DEFAULT_IGNORE_PATTERNS 매칭 파일
+    - Binary 파일
+    """
+    file_diffs = _split_into_file_diffs(diff_content)
+    scored: list[tuple[str, int]] = []
+
+    for fd in file_diffs:
+        m = _DIFF_GIT_PATH_RE.match(fd)
+        if not m:
+            continue
+        path = m.group(1)
+
+        if _matches_ignore(path, _DEFAULT_IGNORE_PATTERNS):
+            continue
+
+        if "Binary files" in fd:
+            continue
+
+        sim = _SIMILARITY_RE.search(fd)
+        if sim and int(sim.group(1)) >= 80:
+            continue
+
+        score = 0
+        for line in fd.splitlines():
+            if (line.startswith("+") and not line.startswith("+++")) or \
+               (line.startswith("-") and not line.startswith("---")):
+                score += 1
+
+        scored.append((path, score))
+
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return [path for path, _ in scored[:max_files]]
+
+
 def extract_incremental_diff(workspace_path: str, mr_iid: str, oldrev: str) -> Optional[DiffResult]:
     """oldrev..HEAD 범위의 증분 diff를 추출한다. 실패 시 None 반환."""
     try:

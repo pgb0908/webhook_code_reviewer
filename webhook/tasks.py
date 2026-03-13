@@ -61,8 +61,14 @@ async def handle_comment_task(
     else:
         logger.info(f"✅ [MR #{mr_iid}] 기존 workspace 재사용. sync 생략.")
 
+    # diff 추출 (파일 컨텍스트용, 실패 시 None → 컨텍스트 없이 진행)
+    diff_result = await asyncio.to_thread(
+        extract_diff, workspace_path, mr_iid, source_branch, target_branch
+    )
+    diff_content = diff_result.content if diff_result else None
+
     # AI 응답 생성 (aider subprocess, 최대 10분 — 스레드로 분리)
-    response = await asyncio.to_thread(run_aider_comment, mr_iid, workspace_path, question)
+    response = await asyncio.to_thread(run_aider_comment, mr_iid, workspace_path, question, diff_content)
     if response is None:
         return
 

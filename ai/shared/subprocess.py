@@ -93,6 +93,7 @@ def run_aider_subprocess(
     mr_iid: str,
     workspace_path: str,
     prompt: str,
+    files: list[str] | None = None,
 ) -> Optional[str]:
     """Aider CLI subprocess를 실행하고 정제된 stdout을 반환한다. 실패 시 None."""
     env = os.environ.copy()
@@ -109,8 +110,13 @@ def run_aider_subprocess(
         "--chat-mode", "ask",   # 파일 수정 없이 질의응답만
         "--exit",
         "--yes",
-        "--message", prompt,
     ]
+
+    for f in (files or []):
+        if os.path.isfile(os.path.join(workspace_path, f)):
+            aider_command += ["--file", f]
+
+    aider_command += ["--message", prompt]
 
     log_cmd = [a if prev != "--message" else "<prompt>" for prev, a in zip([""] + aider_command, aider_command)]
     logger.info(f"🚀 [MR #{mr_iid}] 실행 명령어: {' '.join(log_cmd)}")

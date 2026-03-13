@@ -9,23 +9,34 @@ from typing import Optional
 
 from ai.shared.subprocess import run_aider_subprocess
 from ai.shared.output import parse_yaml_safe, render_comment_markdown, render_raw_fallback
+from git.diff import rank_changed_files
 
 logger = logging.getLogger(__name__)
 
 
-def _build_user_ask_prompt(question: Optional[str]) -> str:
+def _build_user_ask_prompt(question: Optional[str], diff_content: Optional[str] = None) -> str:
     user_question = question if question else "이 Merge Request의 변경 사항에 대해 전반적인 코드 리뷰를 해줘."
+
+    diff_section = ""
+    if diff_content and diff_content.strip():
+        diff_section = f"""[Diff]
+```diff
+{diff_content}
+```
+
+"""
 
     return f"""[역할]
 우리 팀 수석 SRE이자 백엔드 전문가.
 
 ⚠️ 중요: 모든 텍스트 값을 반드시 한국어(한글)로만 작성하라. 영어 사용 절대 금지.
 
-[질문]
+{diff_section}[질문]
 {user_question}
 
 [답변 규칙]
 - 결론부터 시작한다 (질문 반복 금지)
+- Repo Map과 제공된 Diff를 근거로 답변한다
 - Repo Map의 실제 파일명·함수명을 근거로 인용한다
 - 수정 제안은 before/after로 표현한다
 - before/after 필드에는 순수 코드만 넣는다. 설명 문장 혼입 금지
@@ -94,11 +105,13 @@ def run_aider_comment(
         mr_iid: str,
         workspace_path: str,
         question: Optional[str],
+        diff_content: Optional[str] = None,
 ) -> Optional[str]:
     """Aider CLI를 실행하여 응답 텍스트를 반환한다. 실패 시 None."""
     logger.info(f"🧠 [MR #{mr_iid}] 질문에 대한 응답 생성 중...")
-    prompt = _build_user_ask_prompt(question)
-    raw = run_aider_subprocess(mr_iid, workspace_path, prompt)
+    prompt = _build_user_ask_prompt(question, diff_content)
+    files = rank_changed_files(diff_content) if diff_content else []
+    raw = run_aider_subprocess(mr_iid, workspace_path, prompt, files=files)
     if raw is None:
         return None
 
