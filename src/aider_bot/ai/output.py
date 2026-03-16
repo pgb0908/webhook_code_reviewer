@@ -1008,9 +1008,18 @@ def render_comment_markdown(data: dict) -> str:
             before_str = str(before).strip() if before else ""
             after_str = str(after).strip() if after else ""
             if before_str and after_str and before_str != after_str:
-                line_parts.append("예시 수정:")
-                line_parts.append(f"```{language}\n{before_str}\n```")
-                line_parts.append(f"```{language}\n{after_str}\n```")
+                diff_text = _build_unified_diff(before_str, after_str)
+                line_parts.append(
+                    "\n".join(
+                        [
+                            "<details>",
+                            "<summary>예시 수정 보기</summary>",
+                            "",
+                            f"```diff\n{diff_text}\n```",
+                            "</details>",
+                        ]
+                    )
+                )
 
             suggestion_parts.append("\n".join(line_parts))
 
