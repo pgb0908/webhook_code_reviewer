@@ -5,14 +5,73 @@
 # You shall not disclose such Confidential Information and shall use it only in accordance with the terms of the license agreement you entered into with TmaxSoft Co., Ltd.
 
 import logging
+import re
 from typing import Optional
 
-from ai.reviewer import UnitReviewFinding
-from ai.shared.output import render_overview_from_freeform, render_overview_markdown
-from ai.shared.structured import run_aider_and_structure
-from git.diff import ReviewUnit, detect_primary_language
+from aider_bot.ai.review.reviewer import UnitReviewFinding
+from aider_bot.ai.output import render_overview_from_freeform, render_overview_markdown
+from aider_bot.ai.structuring import run_aider_and_structure
+from aider_bot.scm.diff import ReviewUnit, detect_primary_language
 
 logger = logging.getLogger(__name__)
+
+_DIFF_HUNK_RE = re.compile(r"^@@ .* @@")
+
+
+def _extract_code_evidence(unit: ReviewUnit, max_lines: int = 8) -> dict[str, str]:
+    before_lines: list[str] = []
+    after_lines: list[str] = []
+    diff_lines: list[str] = []
+
+    for line in unit.diff.splitlines():
+        if line.startswith(("diff --git", "index ", "--- ", "+++ ")):
+            continue
+        if _DIFF_HUNK_RE.match(line):
+            diff_lines.append(line)
+            continue
+        if line.startswith("-") and not line.startswith("---"):
+            before_lines.append(line[1:])
+            diff_lines.append(line)
+        elif line.startswith("+") and not line.startswith("+++"):
+            after_lines.append(line[1:])
+            diff_lines.append(line)
+        elif line.startswith(" "):
+            if before_lines or after_lines:
+                diff_lines.append(line)
+        if len(before_lines) >= max_lines and len(after_lines) >= max_lines and len(diff_lines) >= max_lines * 2:
+            break
+
+    return {
+        "language": detect_primary_language([unit.path]),
+        "before": "\n".join(before_lines[:max_lines]).strip(),
+        "after": "\n".join(after_lines[:max_lines]).strip(),
+        "diff": "\n".join(diff_lines[: max_lines * 2]).strip(),
+    }
+
+
+def _enrich_file_changes_with_diff_evidence(data: dict, units: list[ReviewUnit]) -> dict:
+    if not isinstance(data, dict):
+        return data
+
+    unit_by_path = {unit.path: unit for unit in units}
+    file_changes = data.get("file_changes")
+    if not isinstance(file_changes, list):
+        return data
+
+    enriched_changes = []
+    for item in file_changes:
+        if not isinstance(item, dict):
+            continue
+        enriched = dict(item)
+        if not (str(enriched.get("before", "")).strip() or str(enriched.get("after", "")).strip()):
+            unit = unit_by_path.get(str(enriched.get("file", "")).strip())
+            if unit is not None:
+                enriched.update(_extract_code_evidence(unit))
+        enriched_changes.append(enriched)
+
+    updated = dict(data)
+    updated["file_changes"] = enriched_changes
+    return updated
 
 
 def _summarize_change(unit: ReviewUnit) -> str:
@@ -46,6 +105,10 @@ def _build_overview_prompt(
                     f"  change_type: {unit.change_type}",
                     f"  risk_score: {unit.risk_score}",
                     f"  summary: {_summarize_change(unit)}",
+                    f"  diff_excerpt:",
+                    "```diff",
+                    "\n".join(unit.diff.splitlines()[:20]),
+                    "```",
                     f"  findings:",
                     finding_lines,
                 ]
@@ -93,6 +156,7 @@ def synthesize_overview(
         return None
 
     if data and "title" in data:
+        data = _enrich_file_changes_with_diff_evidence(data, units)
         return render_overview_markdown(data)
 
     logger.warning("⚠️ [MR #%s] overview structured parse 실패, 자유형 응답 폴백 사용", mr_iid)

@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     workspace_base: str = "/tmp/aider_workspaces"
     aider_timeout: int = 600  # 10분
     llm_timeout: int = 120
+    validation_command: str = ""
+    validation_timeout: int = 180
     max_deep_review_units: int = 12
     max_parallel_reviews: int = 3
     comment_max_context_files: int = 3
@@ -73,6 +75,14 @@ class Settings(BaseSettings):
     def gitlab_api_base(self) -> str:
         return f"http://{self.gitlab_host}/api/v4"
 
+    @property
+    def aider_model(self) -> str:
+        return (os.environ.get("AIDER_MODEL") or self.remote_llm_model).strip()
+
+    @property
+    def llm_client_model(self) -> str:
+        return (os.environ.get("LLM_CLIENT_MODEL") or self.remote_llm_model).strip()
+
     def get_token(self, project_id: str) -> Optional[str]:
         """프로젝트 ID에 해당하는 토큰을 반환한다. 없으면 None."""
         return self.project_tokens.get(str(project_id))
@@ -92,11 +102,15 @@ class Settings(BaseSettings):
             "gitlab_host": self.gitlab_host,
             "remote_llm_base_url": self.remote_llm_base_url,
             "remote_llm_model": self.remote_llm_model,
+            "aider_model": self.aider_model,
+            "llm_client_model": self.llm_client_model,
             "remote_llm_api_key": self._mask_secret(self.remote_llm_api_key),
             "log_level": self.log_level,
             "workspace_base": self.workspace_base,
             "aider_timeout": self.aider_timeout,
             "llm_timeout": self.llm_timeout,
+            "validation_command": self.validation_command or "<auto>",
+            "validation_timeout": self.validation_timeout,
             "max_deep_review_units": self.max_deep_review_units,
             "max_parallel_reviews": self.max_parallel_reviews,
             "comment_max_context_files": self.comment_max_context_files,

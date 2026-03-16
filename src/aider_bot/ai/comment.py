@@ -9,10 +9,10 @@ import os
 import re
 from typing import Optional
 
-from config import settings
-from ai.shared.output import render_comment_from_freeform, render_comment_markdown
-from ai.shared.structured import run_aider_and_structure
-from git.diff import rank_changed_files
+from aider_bot.config import settings
+from aider_bot.ai.output import render_comment_from_freeform, render_comment_markdown
+from aider_bot.ai.structuring import run_aider_and_structure
+from aider_bot.scm.diff import rank_changed_files
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +70,8 @@ def _build_user_ask_prompt(question: Optional[str], diff_content: Optional[str] 
 - Repo Map과 제공된 Diff를 근거로 답변한다
 - Repo Map의 실제 파일명·함수명을 근거로 인용한다
 - 수정 제안은 before/after로 표현한다
+- 문제 위치가 분명하면 파일 경로를 반드시 적는다
+- 수정 제안을 할 때는 복붙 가능한 최소 수정 코드만 제시한다
 - 리뷰 포인트 심각도: critical | warning | suggestion
 - 확실하지 않으면 "(추측)" 명시
 - 코드를 직접 수정하지 말고 제안만 한다

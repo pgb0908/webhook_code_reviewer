@@ -6,11 +6,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 from typing import Optional
 
-from ai.overview import build_push_review_comment, synthesize_overview
-from ai.reviewer import UnitReviewFinding, run_aider_unit_review
-from config import settings
-from git.diff import DiffResult, ReviewUnit, build_review_units
-from review.store import get_cached_unit, load_review_cache, save_review_cache, upsert_cached_unit
+from aider_bot.ai.review.overview import build_push_review_comment, synthesize_overview
+from aider_bot.ai.review.reviewer import UnitReviewFinding, run_aider_unit_review
+from aider_bot.config import settings
+from aider_bot.scm.diff import DiffResult, ReviewUnit, build_review_units
+from aider_bot.ai.review.store import get_cached_unit, load_review_cache, save_review_cache, upsert_cached_unit
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +82,8 @@ def _run_review_units(
     mr_iid: str,
     workspace_path: str,
     diff_result: DiffResult,
+    *,
+    force_first_unit_review: bool = False,
 ) -> tuple[list[ReviewUnit], dict[str, list[UnitReviewFinding]]]:
     units = build_review_units(diff_result.content)
     logger.info("🧱 [MR #%s] review unit 수: %d", mr_iid, len(units))
@@ -99,6 +101,17 @@ def _run_review_units(
                 for item in cached.get("findings", [])
                 if isinstance(item, dict)
             ]
+            continue
+
+        if force_first_unit_review and reviewed_count == 0:
+            deep_review_units.append(unit)
+            reviewed_count += 1
+            logger.info(
+                "ℹ️ [MR #%s] push review 최소 보장 정책으로 deep review 강제: %s (score=%d)",
+                mr_iid,
+                unit.path,
+                unit.risk_score,
+            )
             continue
 
         if _should_deep_review(unit, reviewed_count):
@@ -141,11 +154,31 @@ def review_diff_and_build_overview(
     return synthesize_overview(mr_iid, workspace_path, units, findings_by_unit, original_title)
 
 
+def review_diff_and_collect_findings(
+    mr_iid: str,
+    workspace_path: str,
+    diff_result: DiffResult,
+    *,
+    force_first_unit_review: bool = False,
+) -> tuple[list[ReviewUnit], dict[str, list[UnitReviewFinding]]]:
+    return _run_review_units(
+        mr_iid,
+        workspace_path,
+        diff_result,
+        force_first_unit_review=force_first_unit_review,
+    )
+
+
 def review_diff_and_build_push_comment(
     mr_iid: str,
     workspace_path: str,
     diff_result: DiffResult,
     title: str = "",
 ) -> str:
-    units, findings_by_unit = _run_review_units(mr_iid, workspace_path, diff_result)
+    units, findings_by_unit = review_diff_and_collect_findings(
+        mr_iid,
+        workspace_path,
+        diff_result,
+        force_first_unit_review=True,
+    )
     return build_push_review_comment(units, findings_by_unit, title=title)

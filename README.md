@@ -73,8 +73,10 @@ aider/
 | 변수 | 설명 | 예시 |
 |------|------|------|
 | `GITLAB_HOST` | GitLab 서버 주소 (scheme 제외) | `gitlab.example.com` |
-| `REMOTE_LLM_BASE_URL` | LLM API Base URL | `http://localhost:11434/v1` |
-| `REMOTE_LLM_MODEL` | aider와 llm-client가 함께 사용할 모델명 | `openai/qwen2.5-coder:32b` |
+| `REMOTE_LLM_BASE_URL` | OpenAI 호환 LLM API Base URL (`/v1` 포함/미포함 모두 허용) | `http://localhost:11434/v1` |
+| `REMOTE_LLM_MODEL` | 기본 모델명(하위호환용, 미분리 시 둘 다 사용) | `openai/qwen2.5-coder:32b` |
+| `LLM_CLIENT_MODEL` | 구조화용 llm-client 모델명 | `qwen2.5-coder:32b` |
+| `AIDER_MODEL` | aider/litellm용 모델명 | `openai/qwen2.5-coder:32b` |
 | `PROJECT_TOKEN_{project_id}` | 프로젝트별 GitLab Access Token | `PROJECT_TOKEN_42=glpat-xxxx` |
 
 > 프로젝트 토큰은 여러 개 설정 가능합니다. `project_id`는 GitLab 프로젝트의 숫자 ID입니다.
@@ -88,6 +90,8 @@ aider/
 | `WORKSPACE_BASE` | `/tmp/aider_workspaces` | 저장소 클론 기본 경로 |
 | `AIDER_TIMEOUT` | `600` | Aider 실행 타임아웃 (초) |
 | `LLM_TIMEOUT` | `120` | llm-client 구조화 요청 타임아웃 (초) |
+| `VALIDATION_COMMAND` | `` | push 리뷰 전 실행할 검증 명령. 비우면 Maven/Gradle/CMake를 자동 감지 |
+| `VALIDATION_TIMEOUT` | `180` | 검증 명령 타임아웃 (초) |
 | `MAX_DEEP_REVIEW_UNITS` | `12` | 한 번의 리뷰에서 deep review할 최대 unit 수 |
 | `MAX_PARALLEL_REVIEWS` | `3` | deep review 시 동시에 실행할 aider 요청 수 |
 | `COMMENT_MAX_CONTEXT_FILES` | `3` | comment 응답 시 함께 넘길 최대 파일 수 |

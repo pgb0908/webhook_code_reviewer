@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from fnmatch import fnmatch
 from typing import Optional
 
-from config import settings
+from aider_bot.config import settings
 
 _EXT_TO_LANG: dict[str, str] = {
     ".cpp": "cpp", ".cc": "cpp", ".cxx": "cpp", ".c": "c",
@@ -81,6 +81,13 @@ class ReviewUnit:
     related_paths: list[str]
 
 
+@dataclass
+class DiffLineRef:
+    old_path: str
+    new_path: str
+    new_lines: list[int]
+
+
 # ---------------------------------------------------------------------------
 # 내부 헬퍼
 # ---------------------------------------------------------------------------
@@ -110,6 +117,19 @@ def _detect_change_type(file_diff: str) -> str:
     if re.search(r"^rename from ", file_diff, re.MULTILINE):
         return "renamed"
     return "modified"
+
+
+def _extract_paths(file_diff: str) -> tuple[str, str]:
+    old_path = ""
+    new_path = ""
+    for line in file_diff.splitlines():
+        if line.startswith("--- "):
+            value = line[4:].strip()
+            old_path = value[2:] if value.startswith("a/") else value
+        elif line.startswith("+++ "):
+            value = line[4:].strip()
+            new_path = value[2:] if value.startswith("b/") else value
+    return old_path, new_path
 
 
 def _count_changed_lines(file_diff: str) -> tuple[int, int]:
@@ -271,6 +291,51 @@ def parse_file_diffs(raw_diff: str) -> list[FileDiff]:
             )
         )
     return parsed
+
+
+def build_diff_line_refs(raw_diff: str) -> dict[str, DiffLineRef]:
+    refs: dict[str, DiffLineRef] = {}
+    for fd in _split_into_file_diffs(raw_diff):
+        m = _DIFF_GIT_PATH_RE.match(fd)
+        if not m:
+            continue
+
+        fallback_path = m.group(1)
+        old_path, new_path = _extract_paths(fd)
+        key_path = new_path if new_path and new_path != "/dev/null" else fallback_path
+        old_path = old_path if old_path and old_path != "/dev/null" else key_path
+        new_path = new_path if new_path and new_path != "/dev/null" else key_path
+
+        new_lines: list[int] = []
+        current_old = 0
+        current_new = 0
+        in_hunk = False
+
+        for line in fd.splitlines():
+            if line.startswith("@@"):
+                match = re.match(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@", line)
+                if not match:
+                    in_hunk = False
+                    continue
+                current_old = int(match.group(1))
+                current_new = int(match.group(2))
+                in_hunk = True
+                continue
+
+            if not in_hunk:
+                continue
+
+            if line.startswith("+") and not line.startswith("+++"):
+                new_lines.append(current_new)
+                current_new += 1
+            elif line.startswith("-") and not line.startswith("---"):
+                current_old += 1
+            else:
+                current_old += 1
+                current_new += 1
+
+        refs[key_path] = DiffLineRef(old_path=old_path, new_path=new_path, new_lines=new_lines)
+    return refs
 
 
 # ---------------------------------------------------------------------------

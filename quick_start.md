@@ -27,6 +27,11 @@ uv pip install aider-chat
 
 > `uv sync`는 프로젝트 루트의 `requirements.txt`를 읽어 `.venv`를 자동 생성합니다.
 
+현재 실제 애플리케이션 소스는 `src/aider_bot/` 아래에 있습니다.
+- 실행 엔트리포인트: `main.py`
+- 형상관리 대상 애플리케이션 코드: `src/aider_bot/`
+- 패키지 실행도 가능: `PYTHONPATH=src uv run python -m aider_bot`
+
 ---
 
 ## 3. 환경변수 설정
@@ -42,13 +47,20 @@ GITLAB_HOST=gitlab.example.com
 
 # LLM 설정
 REMOTE_LLM_BASE_URL=http://localhost:11434/v1
-REMOTE_LLM_MODEL=openai/qwen2.5-coder:32b
+REMOTE_LLM_MODEL=openai/qwen2.5-coder:32b   # 기본값(하위호환)
+LLM_CLIENT_MODEL=qwen2.5-coder:32b          # 구조화용 llm-client 모델명
+AIDER_MODEL=openai/qwen2.5-coder:32b        # aider/litellm용 모델명
 REMOTE_LLM_API_KEY=dummy  # 키가 필요없으면 그대로 둠
 
 # 프로젝트별 GitLab Access Token
 # GitLab 프로젝트 ID는 프로젝트 홈 > Settings > General 에서 확인
 PROJECT_TOKEN_42=glpat-xxxxxxxxxxxxxxxxxxxx
 PROJECT_TOKEN_99=glpat-yyyyyyyyyyyyyyyyyyyy
+
+# (선택) push 리뷰 전 검증 명령
+# 비우면 Maven/Gradle/CMake를 자동 감지
+VALIDATION_COMMAND=
+VALIDATION_TIMEOUT=180
 
 # (선택) 봇 계정명 - 자기 멘션 무한루프 방지
 BOT_USERNAME=aider-bot
@@ -95,6 +107,9 @@ BOT_USERNAME=aider-bot
 
 ```bash
 uv run python main.py
+
+# 또는 패키지 실행
+PYTHONPATH=src uv run python -m aider_bot
 ```
 
 서버가 정상 기동되면:
@@ -162,6 +177,24 @@ INFO - ✅ [MR #5] MR overview 수정 성공
 
 완료되면 MR 제목과 설명이 AI 생성 보고서로 교체됩니다.
 
+현재 MR 리뷰 파이프라인은 아래 순서로 동작합니다.
+1. Webhook 수신
+2. 저장소 sync 및 diff 추출
+3. diff를 `review unit` 단위로 정리
+4. 각 `review unit`에 대해 `aider` 리뷰 요청
+5. review 결과 취합
+6. `llm-client` 구조화
+7. GitLab MR 제목/설명 반영
+
+### Push 코드리뷰
+
+MR이 열린 상태에서 새 커밋을 push하면 자동으로 증분 리뷰가 수행됩니다.
+
+- 증분 diff(`oldrev..HEAD`)만 분석
+- 작은 변경이어도 최소 1개 unit은 deep review 수행
+- 가능하면 GitLab diff discussion(inline)으로 게시
+- 빌드/컴파일 검증이 실패하면 그 결과를 우선 코멘트로 게시
+
 ### 질의응답 (@aider 멘션)
 
 MR 코멘트에 `@aider`를 포함해 질문합니다.
@@ -177,6 +210,9 @@ INFO - 🔔 [MR #5] 멘션 감지. 답변 생성을 시작합니다.
 INFO - 🧠 [MR #5] 질문에 대한 응답 생성 중...
 INFO - ✅ [MR #5] GitLab 코멘트 전송 성공
 ```
+
+`@aider` 응답은 가능하면 질문이 달린 같은 discussion thread에 reply로 남기고,
+discussion 식별자를 찾지 못한 경우에만 일반 MR 코멘트로 폴백합니다.
 
 ---
 
@@ -210,7 +246,19 @@ INFO - ✅ [MR #5] GitLab 코멘트 전송 성공
 ❌ [MR #5] LLM 연결 실패
 ```
 
-→ `REMOTE_LLM_BASE_URL`과 `REMOTE_LLM_MODEL`이 올바른지, LLM 서버가 실행 중인지 확인
+→ `REMOTE_LLM_BASE_URL`, `LLM_CLIENT_MODEL`, `AIDER_MODEL`이 올바른지 확인
+
+### Push 리뷰에서 빌드 실패를 놓침
+
+- 프로젝트마다 검증 명령이 다르면 `.env`에 `VALIDATION_COMMAND`를 직접 지정하는 것이 가장 정확합니다.
+- 예시:
+
+```dotenv
+VALIDATION_COMMAND=mvn -B -q -DskipTests compile
+VALIDATION_COMMAND=./gradlew compileJava -x test
+VALIDATION_COMMAND=npm run build
+VALIDATION_COMMAND=pytest -q
+```
 
 ---
 
@@ -223,5 +271,7 @@ ollama pull qwen2.5-coder:32b
 # .env 설정
 REMOTE_LLM_BASE_URL=http://localhost:11434/v1
 REMOTE_LLM_MODEL=openai/qwen2.5-coder:32b
+LLM_CLIENT_MODEL=qwen2.5-coder:32b
+AIDER_MODEL=openai/qwen2.5-coder:32b
 REMOTE_LLM_API_KEY=dummy
 ```

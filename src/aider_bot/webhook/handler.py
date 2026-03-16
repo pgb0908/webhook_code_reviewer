@@ -9,9 +9,9 @@ import logging
 
 from fastapi import APIRouter, Request
 
-from config import settings
-from webhook.tasks import handle_overview_task, handle_comment_task, handle_push_review_task
-from workspace.manager import cleanup_workspace
+from aider_bot.config import settings
+from aider_bot.webhook.context import cleanup_workspace
+from aider_bot.webhook.tasks import handle_overview_task, handle_comment_task, handle_push_review_task
 
 logger = logging.getLogger(__name__)
 
@@ -54,13 +54,28 @@ async def gitlab_webhook(request: Request) -> dict:
         if "@aider" not in comment_text:
             return {"status": "ignored"}
 
+        reply_discussion_id = str(
+            payload.get("object_attributes", {}).get("discussion_id")
+            or payload.get("object_attributes", {}).get("discussion", {}).get("id")
+            or ""
+        ).strip()
         mr_iid = str(merge_request.get("iid"))
         source_branch = merge_request.get("source_branch")
         target_branch = merge_request.get("target_branch", "main")
         clean_question = comment_text.replace("@aider", "").strip()
 
         logger.info(f"🔔 [MR #{mr_iid}] 멘션 감지. 답변 생성을 시작합니다.")
-        _spawn(handle_comment_task(project_id, project_path, mr_iid, source_branch, target_branch, clean_question))
+        _spawn(
+            handle_comment_task(
+                project_id,
+                project_path,
+                mr_iid,
+                source_branch,
+                target_branch,
+                clean_question,
+                reply_discussion_id=reply_discussion_id,
+            )
+        )
         return {"status": "queued"}
 
     # [이벤트 B] MR 상태 변경 시 -> 자동 리뷰 또는 폴더 정리

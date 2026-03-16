@@ -4,8 +4,8 @@
 import logging
 from dataclasses import dataclass
 
-from ai.shared.structured import run_aider_and_structure
-from git.diff import ReviewUnit
+from aider_bot.ai.structuring import run_aider_and_structure
+from aider_bot.scm.diff import ReviewUnit
 
 logger = logging.getLogger(__name__)
 

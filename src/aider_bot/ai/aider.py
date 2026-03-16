@@ -10,7 +10,7 @@ import subprocess
 import logging
 from typing import Optional
 
-from config import settings
+from aider_bot.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +102,7 @@ def run_aider_subprocess(
 
     aider_command = [
         "aider",
-        "--model", settings.remote_llm_model,
+        "--model", settings.aider_model,
         "--api-key", "openai=none",
         "--no-auto-commits",
         "--no-gitignore",

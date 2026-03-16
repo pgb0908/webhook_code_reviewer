@@ -154,6 +154,9 @@ def _parse_protocol_output(text: str, schema: str) -> Optional[dict]:
                 {
                     "file": _extract_tag_block(file_change_body, "FILE") or "",
                     "change": _extract_tag_block(file_change_body, "CHANGE") or "",
+                    "language": _extract_tag_block(file_change_body, "LANGUAGE") or "",
+                    "before": _extract_tag_block(file_change_body, "BEFORE") or "",
+                    "after": _extract_tag_block(file_change_body, "AFTER") or "",
                 }
             )
         for review_point_body in _extract_tag_blocks(body, "REVIEW_POINT"):
@@ -189,6 +192,15 @@ def _severity_label(severity: str) -> str:
     emoji = _SEVERITY_EMOJI.get(key, "🟢")
     label = severity.capitalize() if severity else "Suggestion"
     return f"{emoji} **{label}**"
+
+
+def _build_unified_diff(before: str, after: str) -> str:
+    lines: list[str] = []
+    if before:
+        lines.extend(f"-{line}" for line in before.splitlines())
+    if after:
+        lines.extend(f"+{line}" for line in after.splitlines())
+    return "\n".join(lines).strip()
 
 
 def _extract_json_block(text: str) -> Optional[str]:
@@ -250,6 +262,9 @@ def _coerce_schema(data: dict, schema: str) -> Optional[dict]:
                     {
                         "file": str(item.get("file", "")).strip(),
                         "change": str(item.get("change", "")).strip(),
+                        "language": str(item.get("language", "")).strip(),
+                        "before": str(item.get("before", "")).rstrip(),
+                        "after": str(item.get("after", "")).rstrip(),
                     }
                 )
         for item in data.get("review_points", []) or []:
@@ -906,16 +921,25 @@ def render_overview_markdown(data: dict) -> tuple[str, str]:
 
     file_changes = data.get("file_changes")
     if file_changes and isinstance(file_changes, list):
-        rows = []
+        items = []
         for idx, fc in enumerate(file_changes, 1):
             if not isinstance(fc, dict):
                 continue
             fname = fc.get("file", "")
             change = fc.get("change", "")
-            rows.append(f"| {idx} | `{_escape_table_cell(fname)}` | {_escape_table_cell(change)} |")
-        if rows:
-            table = "## 🔍 주요 변경 사항\n\n| # | 파일 | 변경 내용 |\n|---|------|-----------|"
-            sections.append(table + "\n" + "\n".join(rows))
+            language = str(fc.get("language", "")).strip()
+            before = str(fc.get("before", "")).strip()
+            after = str(fc.get("after", "")).strip()
+            diff_text = str(fc.get("diff", "")).strip() or _build_unified_diff(before, after)
+
+            lines = [f"### {idx}. `{sanitize_gitlab_markdown(fname).replace(chr(10), ' ')}`"]
+            if change:
+                lines.append(sanitize_gitlab_markdown(change))
+            if diff_text:
+                lines.append(f"```diff\n{diff_text}\n```")
+            items.append("\n\n".join(lines))
+        if items:
+            sections.append("## 🔍 주요 변경 사항\n" + "\n\n".join(items))
 
     review_points = data.get("review_points")
     if review_points and isinstance(review_points, list):
@@ -945,17 +969,19 @@ def render_comment_markdown(data: dict) -> str:
     parts = []
 
     conclusion = data.get("conclusion")
-    if conclusion:
-        parts.append(f"## 💡 결론\n{sanitize_gitlab_markdown(str(conclusion).strip())}")
-
     analysis = data.get("analysis")
+    intro_paragraphs: list[str] = []
+    if conclusion:
+        intro_paragraphs.append(sanitize_gitlab_markdown(str(conclusion).strip()))
     if analysis:
-        parts.append(f"## 🔍 상세 분석\n{sanitize_gitlab_markdown(str(analysis).strip())}")
+        intro_paragraphs.append(sanitize_gitlab_markdown(str(analysis).strip()))
+    if intro_paragraphs:
+        parts.append("\n\n".join(paragraph for paragraph in intro_paragraphs if paragraph))
 
     suggestions = data.get("suggestions")
     if suggestions and isinstance(suggestions, list):
-        suggestion_parts = ["## 🛠️ 개선 제안"]
-        for sg in suggestions:
+        suggestion_parts = ["확인할 부분:"]
+        for index, sg in enumerate(suggestions, 1):
             if not isinstance(sg, dict):
                 continue
             severity = sg.get("severity", "suggestion")
@@ -963,19 +989,30 @@ def render_comment_markdown(data: dict) -> str:
             file_ref = sg.get("file", "")
             before = sg.get("before")
             after = sg.get("after")
+            language = str(sg.get("language", "")).strip()
 
-            label = _severity_label(severity)
-            line = f"\n{label} **—** {sanitize_gitlab_markdown(desc)}"
+            severity_label = str(severity).strip().lower() or "suggestion"
+            line_prefix = f"{index}. "
             if file_ref:
-                line += f"\n`{sanitize_gitlab_markdown(file_ref).replace(chr(10), ' ')}`"
-            suggestion_parts.append(line)
+                safe_file = sanitize_gitlab_markdown(file_ref).replace(chr(10), " ")
+                line_prefix += f"`{safe_file}`"
+                if desc:
+                    line_prefix += f": {sanitize_gitlab_markdown(desc)}"
+            elif desc:
+                line_prefix += sanitize_gitlab_markdown(desc)
+            else:
+                line_prefix += f"검토가 필요합니다. ({severity_label})"
+
+            line_parts = [line_prefix]
 
             before_str = str(before).strip() if before else ""
             after_str = str(after).strip() if after else ""
             if before_str and after_str and before_str != after_str:
-                lang_fence = str(sg.get("language", "")).strip()
-                suggestion_parts.append(f"\n**Before**\n```{lang_fence}\n{sanitize_gitlab_markdown(before_str)}\n```")
-                suggestion_parts.append(f"**After**\n```{lang_fence}\n{sanitize_gitlab_markdown(after_str)}\n```")
+                line_parts.append("예시 수정:")
+                line_parts.append(f"```{language}\n{before_str}\n```")
+                line_parts.append(f"```{language}\n{after_str}\n```")
+
+            suggestion_parts.append("\n".join(line_parts))
 
         parts.append("\n".join(suggestion_parts))
 
