@@ -121,6 +121,10 @@ def run_aider_subprocess(
 
     log_cmd = [a if prev != "--message" else "<prompt>" for prev, a in zip([""] + aider_command, aider_command)]
     logger.info(f"🚀 [MR #{mr_iid}] 실행 명령어: {' '.join(log_cmd)}")
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("📝 [MR #%s] prompt 전문:\n%s", mr_iid, prompt)
+        if files:
+            logger.debug("📂 [MR #%s] context files: %s", mr_iid, files)
 
     try:
         process = subprocess.run(
@@ -135,6 +139,11 @@ def run_aider_subprocess(
 
         stdout = _normalize_markdown(_extract_llm_response(_strip_box_drawing(_strip_ansi(process.stdout))))
         stderr = _strip_ansi(process.stderr)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("📥 [MR #%s] aider raw stdout:\n%s", mr_iid, process.stdout)
+            if stderr:
+                logger.debug("📥 [MR #%s] aider raw stderr:\n%s", mr_iid, stderr)
+            logger.debug("📦 [MR #%s] normalized stdout:\n%s", mr_iid, stdout)
 
         if _CONNECTION_ERROR_PATTERNS.search(stdout) or _CONNECTION_ERROR_PATTERNS.search(stderr):
             logger.error(f"❌ [MR #{mr_iid}] LLM 연결 실패 (exit 0이지만 오류 감지):\n{stderr or stdout}")

@@ -7,6 +7,7 @@
 import logging
 import requests
 
+from ai.shared.output import sanitize_gitlab_markdown
 from config import settings
 
 logger = logging.getLogger(__name__)
@@ -42,10 +43,11 @@ def post_mr_comment(project_id: str, mr_iid: str, message: str, token: str) -> N
     logger.info(f"📡 [MR #{mr_iid}] 코멘트 전송 시도: {url}")
 
     headers = {"PRIVATE-TOKEN": token}
+    safe_message = sanitize_gitlab_markdown(message)
     body = (
         "<details>\n"
         "<summary>🤖 <strong>Aider AI 응답</strong> — 클릭하여 펼치기</summary>\n\n"
-        f"{message}\n\n"
+        f"{safe_message}\n\n"
         "---\n"
         "<sub>🤖 Aider AI Code Review Bot 자동 생성 · "
         "멘션: <code>aider 질문내용</code></sub>\n"

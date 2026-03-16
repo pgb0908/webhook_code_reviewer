@@ -13,8 +13,8 @@ from config import settings
 from git.sync import sync_repository
 from git.diff import extract_diff, extract_incremental_diff
 from gitlab.client import change_mr_overview, post_mr_comment
-from ai.overview import run_aider_overview
 from ai.comment import run_aider_comment
+from review.pipeline import review_diff_and_build_overview, review_diff_and_build_push_comment
 from workspace.manager import get_workspace_path
 
 logger = logging.getLogger(__name__)
@@ -114,8 +114,8 @@ async def handle_overview_task(
     if diff_result is None:
         return
 
-    # 3단계: AI overview 생성
-    result = await asyncio.to_thread(run_aider_overview, mr_iid, workspace_path, diff_result, original_title)
+    # 3단계: unit 기반 AI overview 생성
+    result = await asyncio.to_thread(review_diff_and_build_overview, mr_iid, workspace_path, diff_result, original_title)
     if result is None:
         return
     title, description = result
@@ -159,15 +159,6 @@ async def handle_push_review_task(
         logger.info(f"[MR #{mr_iid}] 증분 diff 없음. 코드리뷰 생략.")
         return
 
-    # 3단계: AI 코드리뷰 생성 (기존 overview 함수 재사용)
-    result = await asyncio.to_thread(run_aider_overview, mr_iid, workspace_path, diff_result, "")
-    if result is None:
-        return
-    title, description = result
-
-    # 4단계: MR 코멘트로 게시
-    if title:
-        comment = f"## 📝 Push 코드리뷰\n**{title}**\n\n{description}"
-    else:
-        comment = f"## 📝 Push 코드리뷰\n\n{description}"
+    # 3단계: unit 기반 증분 코드리뷰 생성
+    comment = await asyncio.to_thread(review_diff_and_build_push_comment, mr_iid, workspace_path, diff_result, "")
     await asyncio.to_thread(post_mr_comment, project_id, mr_iid, comment, token)

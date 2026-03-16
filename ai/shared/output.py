@@ -4,6 +4,7 @@
 # This software is the confidential and proprietary information of TmaxSoft Co., Ltd. ("Confidential Information").
 # You shall not disclose such Confidential Information and shall use it only in accordance with the terms of the license agreement you entered into with TmaxSoft Co., Ltd.
 
+import json
 import logging
 import re
 from typing import Optional
@@ -13,6 +14,7 @@ import yaml
 logger = logging.getLogger(__name__)
 
 _YAML_FENCE_RE = re.compile(r"```(?:yaml|YAML)\s*\n(.*?)```", re.DOTALL)
+_JSON_FENCE_RE = re.compile(r"```(?:json|JSON)\s*\n(.*?)```", re.DOTALL)
 _BLOCK_SCALAR_LINE_RE = re.compile(r"^(\s*)[\w\-]+\s*:\s*[|>][+\-]?\s*$")
 _YAML_KEY_LINE_RE = re.compile(r"^(\s*)[\w\-]+\s*:")
 _YAML_KEY_VALUE_RE = re.compile(r"^(\s*)([\w\-]+)\s*:\s*(.*)")
@@ -38,12 +40,291 @@ _SEVERITY_EMOJI = {
     "suggestion": "🟢",
 }
 
+_PROTOCOL_ROOTS = {
+    "comment": ("<COMMENT>", "</COMMENT>"),
+    "overview": ("<OVERVIEW>", "</OVERVIEW>"),
+    "unit_review": ("<UNIT_REVIEW>", "</UNIT_REVIEW>"),
+}
+_URL_LINE_RE = re.compile(r"^https?://\S+$", re.IGNORECASE)
+_ENGLISH_HEAVY_RE = re.compile(r"[A-Za-z]{4,}")
+_HANGUL_RE = re.compile(r"[가-힣]")
+
+
+def _escape_table_cell(text: str) -> str:
+    return str(text).replace("|", "\\|").replace("\n", "<br>")
+
+
+def sanitize_gitlab_markdown(text: str) -> str:
+    """GitLab 렌더링이 깨지지 않도록 최소 정규화한다."""
+    output = str(text or "").replace("\r\n", "\n").strip()
+    output = re.sub(r"\n{3,}", "\n\n", output)
+    if output.count("```") % 2 == 1:
+        output += "\n```"
+    return output
+
+
+def _contains_hangul(text: str) -> bool:
+    return bool(_HANGUL_RE.search(str(text or "")))
+
+
+def _is_english_heavy(text: str) -> bool:
+    if not text:
+        return False
+    return bool(_ENGLISH_HEAVY_RE.search(text)) and not _contains_hangul(text)
+
+
+def _normalize_freeform_paragraphs(raw: str) -> list[str]:
+    text = sanitize_gitlab_markdown(raw)
+    paragraphs = [part.strip() for part in re.split(r"\n\s*\n", text) if part.strip()]
+    cleaned: list[str] = []
+    seen: set[str] = set()
+
+    has_korean = any(_contains_hangul(part) for part in paragraphs)
+    for part in paragraphs:
+        part = re.sub(r"\n{2,}", "\n", part).strip()
+        if not part:
+            continue
+        if _URL_LINE_RE.match(part):
+            continue
+        if "Would you like me to review" in part:
+            continue
+        if "I've reviewed the provided files and the diff." in part and has_korean:
+            continue
+        if _is_english_heavy(part) and has_korean:
+            continue
+        dedupe_key = re.sub(r"\s+", " ", part)
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        cleaned.append(part)
+    return cleaned
+
+
+def _extract_tag_block(text: str, tag: str) -> Optional[str]:
+    match = re.search(rf"<{tag}>\s*(.*?)\s*</{tag}>", text, re.DOTALL)
+    if not match:
+        return None
+    return match.group(1).strip()
+
+
+def _extract_tag_blocks(text: str, tag: str) -> list[str]:
+    return [match.strip() for match in re.findall(rf"<{tag}>\s*(.*?)\s*</{tag}>", text, re.DOTALL)]
+
+
+def _parse_protocol_output(text: str, schema: str) -> Optional[dict]:
+    root = _PROTOCOL_ROOTS.get(schema)
+    if not root:
+        return None
+
+    start_tag, end_tag = root
+    start = text.find(start_tag)
+    end = text.rfind(end_tag)
+    if start == -1 or end == -1 or end <= start:
+        return None
+    body = text[start + len(start_tag):end].strip()
+
+    if schema == "comment":
+        result = {
+            "conclusion": _extract_tag_block(body, "CONCLUSION") or "",
+            "analysis": _extract_tag_block(body, "ANALYSIS") or "",
+            "suggestions": [],
+        }
+        for suggestion_body in _extract_tag_blocks(body, "SUGGESTION"):
+            result["suggestions"].append(
+                {
+                    "severity": (_extract_tag_block(suggestion_body, "SEVERITY") or "suggestion").strip(),
+                    "description": _extract_tag_block(suggestion_body, "DESCRIPTION") or "",
+                    "file": _extract_tag_block(suggestion_body, "FILE") or "",
+                    "language": _extract_tag_block(suggestion_body, "LANGUAGE") or "",
+                    "before": _extract_tag_block(suggestion_body, "BEFORE") or "",
+                    "after": _extract_tag_block(suggestion_body, "AFTER") or "",
+                }
+            )
+        return result
+
+    if schema == "overview":
+        result = {
+            "title": _extract_tag_block(body, "TITLE") or "",
+            "summary": _extract_tag_block(body, "SUMMARY") or "",
+            "file_changes": [],
+            "review_points": [],
+        }
+        for file_change_body in _extract_tag_blocks(body, "FILE_CHANGE"):
+            result["file_changes"].append(
+                {
+                    "file": _extract_tag_block(file_change_body, "FILE") or "",
+                    "change": _extract_tag_block(file_change_body, "CHANGE") or "",
+                }
+            )
+        for review_point_body in _extract_tag_blocks(body, "REVIEW_POINT"):
+            result["review_points"].append(
+                {
+                    "severity": (_extract_tag_block(review_point_body, "SEVERITY") or "suggestion").strip(),
+                    "description": _extract_tag_block(review_point_body, "DESCRIPTION") or "",
+                    "file": _extract_tag_block(review_point_body, "FILE") or "",
+                }
+            )
+        return result
+
+    if schema == "unit_review":
+        result = {"findings": []}
+        for finding_body in _extract_tag_blocks(body, "FINDING"):
+            result["findings"].append(
+                {
+                    "severity": (_extract_tag_block(finding_body, "SEVERITY") or "suggestion").strip(),
+                    "title": _extract_tag_block(finding_body, "TITLE") or "",
+                    "description": _extract_tag_block(finding_body, "DESCRIPTION") or "",
+                    "file": _extract_tag_block(finding_body, "FILE") or "",
+                    "lines": _extract_tag_block(finding_body, "LINES") or "",
+                    "confidence": _extract_tag_block(finding_body, "CONFIDENCE") or "",
+                }
+            )
+        return result
+
+    return None
+
 
 def _severity_label(severity: str) -> str:
     key = severity.lower() if severity else ""
     emoji = _SEVERITY_EMOJI.get(key, "🟢")
     label = severity.capitalize() if severity else "Suggestion"
     return f"{emoji} **{label}**"
+
+
+def _extract_json_block(text: str) -> Optional[str]:
+    match = _JSON_FENCE_RE.search(text)
+    if match:
+        return match.group(1).strip()
+
+    start = -1
+    opening = ""
+    for idx, ch in enumerate(text):
+        if ch in "{[":
+            start = idx
+            opening = ch
+            break
+    if start == -1:
+        return None
+
+    closing = "}" if opening == "{" else "]"
+    depth = 0
+    in_string = False
+    escaped = False
+    for idx in range(start, len(text)):
+        ch = text[idx]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+
+        if ch == '"':
+            in_string = True
+            continue
+        if ch == opening:
+            depth += 1
+        elif ch == closing:
+            depth -= 1
+            if depth == 0:
+                return text[start:idx + 1].strip()
+    return None
+
+
+def _coerce_schema(data: dict, schema: str) -> Optional[dict]:
+    if not isinstance(data, dict):
+        return None
+
+    if schema == "overview":
+        result = {
+            "title": str(data.get("title", "")).strip(),
+            "summary": str(data.get("summary", "")).strip(),
+            "file_changes": [],
+            "review_points": [],
+        }
+        for item in data.get("file_changes", []) or []:
+            if isinstance(item, dict):
+                result["file_changes"].append(
+                    {
+                        "file": str(item.get("file", "")).strip(),
+                        "change": str(item.get("change", "")).strip(),
+                    }
+                )
+        for item in data.get("review_points", []) or []:
+            if isinstance(item, dict):
+                result["review_points"].append(
+                    {
+                        "severity": str(item.get("severity", "suggestion")).strip() or "suggestion",
+                        "description": str(item.get("description", "")).strip(),
+                        "file": str(item.get("file", "")).strip(),
+                    }
+                )
+        return result
+
+    if schema == "comment":
+        result = {
+            "conclusion": str(data.get("conclusion", "")).strip(),
+            "analysis": str(data.get("analysis", "")).strip(),
+            "suggestions": [],
+        }
+        for item in data.get("suggestions", []) or []:
+            if isinstance(item, dict):
+                result["suggestions"].append(
+                    {
+                        "severity": str(item.get("severity", "suggestion")).strip() or "suggestion",
+                        "description": str(item.get("description", "")).strip(),
+                        "file": str(item.get("file", "")).strip(),
+                        "language": str(item.get("language", "")).strip(),
+                        "before": str(item.get("before", "")).rstrip(),
+                        "after": str(item.get("after", "")).rstrip(),
+                    }
+                )
+        return result
+
+    if schema == "unit_review":
+        result = {"findings": []}
+        for item in data.get("findings", []) or []:
+            if isinstance(item, dict):
+                result["findings"].append(
+                    {
+                        "severity": str(item.get("severity", "suggestion")).strip() or "suggestion",
+                        "title": str(item.get("title", "")).strip(),
+                        "description": str(item.get("description", "")).strip(),
+                        "file": str(item.get("file", "")).strip(),
+                        "lines": str(item.get("lines", "")).strip(),
+                        "confidence": str(item.get("confidence", "")).strip(),
+                    }
+                )
+        return result
+
+    return data
+
+
+def parse_structured_output(text: str, schema: str) -> Optional[dict]:
+    """프로토콜 우선, 이후 JSON/YAML 순으로 파싱한다."""
+    protocol_data = _parse_protocol_output(text, schema)
+    if protocol_data is not None:
+        return _coerce_schema(protocol_data, schema)
+
+    json_block = _extract_json_block(text)
+    if json_block:
+        try:
+            data = json.loads(json_block)
+            coerced = _coerce_schema(data, schema)
+            if coerced is not None:
+                return coerced
+        except json.JSONDecodeError:
+            pass
+
+    if "```yaml" not in text and "```YAML" not in text and "title:" not in text and "conclusion:" not in text and "findings:" not in text:
+        return None
+
+    yaml_data = parse_yaml_safe(text, schema=schema)
+    if yaml_data is None:
+        return None
+    return _coerce_schema(yaml_data, schema)
 
 
 def _repair_yaml_block_scalars(text: str) -> str:
@@ -272,12 +553,62 @@ def _needs_quoting(value: str) -> bool:
 _YAML_OPEN_FENCE_RE = re.compile(r"```(?:yaml|YAML)\s*\n(.*)", re.DOTALL)
 
 
+def _extract_top_level_section(text: str, key: str, next_keys: list[str]) -> Optional[str]:
+    """최상위 key 구간을 추출한다."""
+    pattern = re.compile(rf"^{re.escape(key)}\s*:\s*(.*)$", re.MULTILINE)
+    match = pattern.search(text)
+    if not match:
+        return None
+
+    start = match.start()
+    end = len(text)
+    for next_key in next_keys:
+        next_pattern = re.compile(rf"^{re.escape(next_key)}\s*:", re.MULTILINE)
+        next_match = next_pattern.search(text, match.end())
+        if next_match:
+            end = min(end, next_match.start())
+    return text[start:end].strip()
+
+
+def _extract_scalar_value(text: str, key: str, next_keys: list[str]) -> Optional[str]:
+    """top-level scalar 값을 최대한 보존해서 추출한다."""
+    section = _extract_top_level_section(text, key, next_keys)
+    if not section:
+        return None
+
+    lines = section.splitlines()
+    if not lines:
+        return None
+
+    first = lines[0]
+    _, _, remainder = first.partition(":")
+    value = remainder.strip()
+
+    if value in ("|", ">") or value.startswith("|") or value.startswith(">"):
+        body = []
+        for line in lines[1:]:
+            body.append(line.strip())
+        return "\n".join(item for item in body).strip()
+
+    if value:
+        extra_lines = []
+        for line in lines[1:]:
+            stripped = line.strip()
+            if stripped:
+                extra_lines.append(stripped)
+        if extra_lines:
+            return " ".join([value, *extra_lines]).strip().strip('"').strip("'")
+        return value.strip().strip('"').strip("'")
+
+    return None
+
+
 def extract_yaml_block(text: str) -> Optional[str]:
     """LLM 출력에서 YAML 블록을 추출한다.
 
     1순위: ```yaml ... ``` 펜스 탐색
     2순위: 닫힌 펜스 없이 ```yaml 이후 끝까지 추출
-    3순위: 'title:' 또는 'conclusion:' 으로 시작하는 줄부터 끝까지 추출
+    3순위: 'title:' / 'conclusion:' / 'findings:' 로 시작하는 줄부터 끝까지 추출
     실패 시 None
     """
     match = _YAML_FENCE_RE.search(text)
@@ -301,7 +632,7 @@ def extract_yaml_block(text: str) -> Optional[str]:
     lines = text.splitlines()
     for i, line in enumerate(lines):
         stripped = line.strip()
-        if stripped.startswith("title:") or stripped.startswith("conclusion:"):
+        if stripped.startswith("title:") or stripped.startswith("conclusion:") or stripped.startswith("findings:"):
             return "\n".join(lines[i:]).strip()
 
     return None
@@ -339,31 +670,65 @@ def _extract_fields_by_regex(text: str, schema: str) -> Optional[dict]:
                 result["review_points"].append(rp)
 
     elif schema == "comment":
-        # conclusion
-        m = re.search(r"^conclusion\s*:\s*\|?\s*\n((?:[ \t]+.+\n?)+)", text, re.MULTILINE)
-        if m:
-            result["conclusion"] = "\n".join(l.strip() for l in m.group(1).splitlines()).strip()
-        else:
-            m2 = re.search(r"^conclusion\s*:\s*(.+)", text, re.MULTILINE)
-            if m2:
-                result["conclusion"] = m2.group(1).strip().strip('"').strip("'")
-        # analysis
-        m = re.search(r"^analysis\s*:\s*\|?\s*\n((?:[ \t]+.+\n?)+)", text, re.MULTILINE)
-        if m:
-            result["analysis"] = "\n".join(l.strip() for l in m.group(1).splitlines()).strip()
-        else:
-            m2 = re.search(r"^analysis\s*:\s*(.+)", text, re.MULTILINE)
-            if m2:
-                result["analysis"] = m2.group(1).strip().strip('"').strip("'")
-        # suggestions (severity + description only, no before/after)
-        sg_items = re.findall(r"-\s*severity\s*:\s*(.+)\n\s*description\s*:\s*(.+?)(?:\n\s*file\s*:\s*(.+))?(?:\n|$)", text)
-        if sg_items:
-            result["suggestions"] = []
-            for sev, desc, fref in sg_items:
-                sg: dict = {"severity": sev.strip(), "description": desc.strip()}
-                if fref and fref.strip():
-                    sg["file"] = fref.strip()
-                result["suggestions"].append(sg)
+        conclusion = _extract_scalar_value(text, "conclusion", ["analysis", "suggestions"])
+        if conclusion:
+            result["conclusion"] = conclusion
+
+        analysis = _extract_scalar_value(text, "analysis", ["suggestions"])
+        if analysis:
+            result["analysis"] = analysis
+
+        suggestions_section = _extract_top_level_section(text, "suggestions", [])
+        if suggestions_section:
+            try:
+                parsed = yaml.safe_load(suggestions_section)
+                if isinstance(parsed, dict) and isinstance(parsed.get("suggestions"), list):
+                    result["suggestions"] = parsed["suggestions"]
+            except yaml.YAMLError:
+                sg_items = re.findall(
+                    r"-\s*severity\s*:\s*(.+)\n"
+                    r"\s*description\s*:\s*(.+(?:\n(?!\s*(?:file|language|before|after|-\s*severity)\s*:).+)*)"
+                    r"(?:\n\s*file\s*:\s*(.+))?"
+                    r"(?:\n|$)",
+                    text,
+                )
+                if sg_items:
+                    result["suggestions"] = []
+                    for sev, desc, fref in sg_items:
+                        sg: dict = {"severity": sev.strip(), "description": " ".join(line.strip() for line in desc.splitlines()).strip()}
+                        if fref and fref.strip():
+                            sg["file"] = fref.strip()
+                        result["suggestions"].append(sg)
+
+    elif schema == "unit_review":
+        findings = re.findall(
+            r"-\s*severity\s*:\s*(.+)\n"
+            r"(?:\s*title\s*:\s*(.+)\n)?"
+            r"\s*description\s*:\s*(.+?)"
+            r"(?:\n\s*file\s*:\s*(.+))?"
+            r"(?:\n\s*lines\s*:\s*(.+))?"
+            r"(?:\n\s*confidence\s*:\s*(.+))?"
+            r"(?:\n|$)",
+            text,
+        )
+        if findings:
+            result["findings"] = []
+            for sev, title, desc, file_ref, lines_ref, confidence in findings:
+                finding: dict = {
+                    "severity": sev.strip(),
+                    "description": desc.strip(),
+                }
+                if title and title.strip():
+                    finding["title"] = title.strip().strip('"').strip("'")
+                if file_ref and file_ref.strip():
+                    finding["file"] = file_ref.strip()
+                if lines_ref and lines_ref.strip():
+                    finding["lines"] = lines_ref.strip().strip('"').strip("'")
+                if confidence and confidence.strip():
+                    finding["confidence"] = confidence.strip().strip('"').strip("'")
+                result["findings"].append(finding)
+        elif re.search(r"^findings\s*:\s*\[\s*\]\s*$", text, re.MULTILINE):
+            result["findings"] = []
 
     if not result:
         return None
@@ -397,12 +762,67 @@ def render_raw_fallback(raw: str) -> str:
     return header + "\n" + text if text else header
 
 
+def render_comment_from_freeform(raw: str) -> str:
+    """자유형 텍스트를 GitLab 댓글용 마크다운으로 안전하게 렌더링한다."""
+    paragraphs = _normalize_freeform_paragraphs(raw)
+    if not paragraphs:
+        return (
+            "## 💡 결론\n"
+            "응답을 안정적으로 구조화하지 못했습니다.\n\n"
+            "## 🔍 상세 분석\n"
+            "이번 요청은 자유형 응답만 생성되어 한국어 구조화 결과를 만들지 못했습니다. "
+            "로그에서 `llm-client 구조화 실패` 여부를 확인해 주세요."
+        )
+
+    korean_paragraphs = [part for part in paragraphs if _contains_hangul(part)]
+    if korean_paragraphs:
+        paragraphs = korean_paragraphs
+    else:
+        return (
+            "## 💡 결론\n"
+            "영문 자유형 응답만 생성되어 구조화된 한국어 답변을 만들지 못했습니다.\n\n"
+            "## 🔍 상세 분석\n"
+            "현재 응답은 GitLab에 그대로 게시하지 않고 생략했습니다. "
+            "DEBUG 로그에서 `aider raw stdout`과 `llm-client 응답 전문`을 확인해 주세요."
+        )
+
+    conclusion = paragraphs[0]
+    remainder = "\n\n".join(paragraphs[1:]).strip()
+
+    parts = [f"## 💡 결론\n{conclusion}"]
+    if remainder:
+        parts.append(f"## 🔍 상세 분석\n{remainder}")
+    return sanitize_gitlab_markdown("\n\n".join(parts))
+
+
+def render_overview_from_freeform(raw: str, original_title: str) -> tuple[str, str]:
+    """자유형 overview 텍스트를 MR description 용 마크다운으로 변환한다."""
+    text = sanitize_gitlab_markdown(raw)
+    paragraphs = [part.strip() for part in re.split(r"\n\s*\n", text) if part.strip()]
+    if not paragraphs:
+        return original_title, (
+            "> ⚠️ AI overview를 구조화하지 못했습니다.\n\n"
+            "## 📋 변경 개요\n이번 변경에 대한 요약 생성에 실패했습니다."
+        )
+
+    summary = paragraphs[0]
+    remainder = "\n\n".join(paragraphs[1:]).strip()
+    sections = [
+        "> 🤖 이 설명은 Aider AI가 자동 생성했습니다.\n",
+        f"## 📋 변경 개요\n{summary}",
+    ]
+    if remainder:
+        sections.append(f"## 🔍 추가 분석\n{remainder}")
+    sections.append("---\n<sub>🤖 Aider AI Code Review Bot 자동 생성</sub>")
+    return original_title, sanitize_gitlab_markdown("\n\n".join(sections))
+
+
 def parse_yaml_safe(text: str, schema: Optional[str] = None) -> Optional[dict]:
     """LLM 출력 텍스트에서 YAML을 파싱하여 dict를 반환한다. 실패 시 None.
 
     Args:
         text: LLM 원본 출력 텍스트
-        schema: regex 폴백 시 사용할 스키마 ("overview" | "comment", optional)
+        schema: regex 폴백 시 사용할 스키마 ("overview" | "comment" | "unit_review", optional)
     """
     logger.debug(f"디버깅 텍스트: {text}")
 
@@ -458,7 +878,7 @@ def parse_yaml_safe(text: str, schema: Optional[str] = None) -> Optional[dict]:
         truncated = '\n\n'.join(segments[:n])
         try:
             data = yaml.safe_load(truncated)
-            if isinstance(data, dict) and ("title" in data or "conclusion" in data):
+            if isinstance(data, dict) and ("title" in data or "conclusion" in data or "findings" in data):
                 logger.info(f"ℹ️ parse_yaml_safe: 후미 텍스트 제거 후 파싱 성공 (segments={n}/{len(segments)})")
                 return data
         except yaml.YAMLError:
@@ -466,7 +886,7 @@ def parse_yaml_safe(text: str, schema: Optional[str] = None) -> Optional[dict]:
 
     # 6차 시도: regex 기반 필드 추출
     if schema:
-        regex_result = _extract_fields_by_regex(block, schema)
+        regex_result = _extract_fields_by_regex(quoted, schema)
         if regex_result:
             return regex_result
 
@@ -476,13 +896,13 @@ def parse_yaml_safe(text: str, schema: Optional[str] = None) -> Optional[dict]:
 
 def render_overview_markdown(data: dict) -> tuple[str, str]:
     """YAML dict를 overview (title, description) 마크다운으로 렌더링한다."""
-    title = str(data.get("title", "")).strip()
+    title = sanitize_gitlab_markdown(str(data.get("title", "")).strip()).replace("\n", " ")
 
     sections = ["> 🤖 이 설명은 Aider AI가 자동 생성했습니다.\n"]
 
     summary = data.get("summary")
     if summary:
-        sections.append(f"## 📋 변경 개요\n{str(summary).strip()}")
+        sections.append(f"## 📋 변경 개요\n{sanitize_gitlab_markdown(str(summary).strip())}")
 
     file_changes = data.get("file_changes")
     if file_changes and isinstance(file_changes, list):
@@ -492,7 +912,7 @@ def render_overview_markdown(data: dict) -> tuple[str, str]:
                 continue
             fname = fc.get("file", "")
             change = fc.get("change", "")
-            rows.append(f"| {idx} | `{fname}` | {change} |")
+            rows.append(f"| {idx} | `{_escape_table_cell(fname)}` | {_escape_table_cell(change)} |")
         if rows:
             table = "## 🔍 주요 변경 사항\n\n| # | 파일 | 변경 내용 |\n|---|------|-----------|"
             sections.append(table + "\n" + "\n".join(rows))
@@ -507,16 +927,16 @@ def render_overview_markdown(data: dict) -> tuple[str, str]:
             desc = rp.get("description", "")
             file_ref = rp.get("file", "")
             label = _severity_label(severity)
-            bullet = f"- {label}: {desc}"
+            bullet = f"- {label}: {sanitize_gitlab_markdown(desc)}"
             if file_ref:
-                bullet += f" (`{file_ref}`)"
+                bullet += f" (`{sanitize_gitlab_markdown(file_ref).replace(chr(10), ' ')}`)"
             bullets.append(bullet)
         if bullets:
             sections.append("## ⚠️ 리뷰 포인트\n" + "\n".join(bullets))
 
     sections.append("---\n<sub>🤖 Aider AI Code Review Bot 자동 생성</sub>")
 
-    description = "\n\n".join(sections)
+    description = sanitize_gitlab_markdown("\n\n".join(sections))
     return title, description
 
 
@@ -526,11 +946,11 @@ def render_comment_markdown(data: dict) -> str:
 
     conclusion = data.get("conclusion")
     if conclusion:
-        parts.append(f"## 💡 결론\n{str(conclusion).strip()}")
+        parts.append(f"## 💡 결론\n{sanitize_gitlab_markdown(str(conclusion).strip())}")
 
     analysis = data.get("analysis")
     if analysis:
-        parts.append(f"## 🔍 상세 분석\n{str(analysis).strip()}")
+        parts.append(f"## 🔍 상세 분석\n{sanitize_gitlab_markdown(str(analysis).strip())}")
 
     suggestions = data.get("suggestions")
     if suggestions and isinstance(suggestions, list):
@@ -545,18 +965,18 @@ def render_comment_markdown(data: dict) -> str:
             after = sg.get("after")
 
             label = _severity_label(severity)
-            line = f"\n{label} **—** {desc}"
+            line = f"\n{label} **—** {sanitize_gitlab_markdown(desc)}"
             if file_ref:
-                line += f"\n`{file_ref}`"
+                line += f"\n`{sanitize_gitlab_markdown(file_ref).replace(chr(10), ' ')}`"
             suggestion_parts.append(line)
 
             before_str = str(before).strip() if before else ""
             after_str = str(after).strip() if after else ""
             if before_str and after_str and before_str != after_str:
                 lang_fence = str(sg.get("language", "")).strip()
-                suggestion_parts.append(f"\n**Before**\n```{lang_fence}\n{before_str}\n```")
-                suggestion_parts.append(f"**After**\n```{lang_fence}\n{after_str}\n```")
+                suggestion_parts.append(f"\n**Before**\n```{lang_fence}\n{sanitize_gitlab_markdown(before_str)}\n```")
+                suggestion_parts.append(f"**After**\n```{lang_fence}\n{sanitize_gitlab_markdown(after_str)}\n```")
 
         parts.append("\n".join(suggestion_parts))
 
-    return "\n\n".join(parts)
+    return sanitize_gitlab_markdown("\n\n".join(parts))

@@ -4,6 +4,7 @@
 # This software is the confidential and proprietary information of TmaxSoft Co., Ltd. ("Confidential Information").
 # You shall not disclose such Confidential Information and shall use it only in accordance with the terms of the license agreement you entered into with TmaxSoft Co., Ltd.
 
+import hashlib
 import os
 import re
 import logging
@@ -54,6 +55,30 @@ _DEFAULT_IGNORE_PATTERNS: list[str] = [
 @dataclass
 class DiffResult:
     content: str
+    source_sha: str = ""
+    target_sha: str = ""
+
+
+@dataclass
+class FileDiff:
+    path: str
+    change_type: str
+    content: str
+    added_lines: int
+    deleted_lines: int
+
+
+@dataclass
+class ReviewUnit:
+    unit_id: str
+    path: str
+    change_type: str
+    diff: str
+    added_lines: int
+    deleted_lines: int
+    risk_score: int
+    tags: list[str]
+    related_paths: list[str]
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +100,86 @@ def _split_into_file_diffs(raw_diff: str) -> list[str]:
 def _matches_ignore(filename: str, patterns: list[str]) -> bool:
     """filename이 패턴 중 하나라도 매칭되면 True."""
     return any(fnmatch(filename, pat) for pat in patterns)
+
+
+def _detect_change_type(file_diff: str) -> str:
+    if "new file mode" in file_diff:
+        return "added"
+    if "deleted file mode" in file_diff:
+        return "deleted"
+    if re.search(r"^rename from ", file_diff, re.MULTILINE):
+        return "renamed"
+    return "modified"
+
+
+def _count_changed_lines(file_diff: str) -> tuple[int, int]:
+    added = 0
+    deleted = 0
+    for line in file_diff.splitlines():
+        if line.startswith("+++") or line.startswith("---"):
+            continue
+        if line.startswith("+"):
+            added += 1
+        elif line.startswith("-"):
+            deleted += 1
+    return added, deleted
+
+
+def _extract_related_paths(path: str, all_paths: list[str]) -> list[str]:
+    base = os.path.splitext(os.path.basename(path))[0]
+    directory = os.path.dirname(path)
+    related: list[str] = []
+    for candidate in all_paths:
+        if candidate == path:
+            continue
+        if os.path.dirname(candidate) == directory:
+            related.append(candidate)
+            continue
+        candidate_base = os.path.splitext(os.path.basename(candidate))[0]
+        if candidate_base == base or candidate_base in {f"test_{base}", f"{base}_test"}:
+            related.append(candidate)
+    return related[:5]
+
+
+def _score_review_unit(path: str, file_diff: str, added_lines: int, deleted_lines: int) -> tuple[int, list[str]]:
+    path_lower = path.lower()
+    diff_lower = file_diff.lower()
+    score = min(40, added_lines + deleted_lines)
+    tags: list[str] = []
+
+    if any(token in path_lower for token in ("auth", "permission", "security", "login", "token")):
+        score += 30
+        tags.append("security")
+    if any(token in diff_lower for token in ("transaction", "rollback", "commit", "select ", "update ", "delete from", "insert into")):
+        score += 20
+        tags.append("database")
+    if any(token in diff_lower for token in ("thread", "lock", "mutex", "asyncio", "await ", "concurrent", "race")):
+        score += 20
+        tags.append("concurrency")
+    if any(token in path_lower for token in ("api", "controller", "handler", "router", "endpoint")):
+        score += 15
+        tags.append("api")
+    if any(token in path_lower for token in ("config", "settings", "deployment", "docker", "k8s", "helm")):
+        score += 10
+        tags.append("ops")
+    if re.search(r"^\+.*(TODO|FIXME|XXX)", file_diff, re.MULTILINE):
+        score += 10
+        tags.append("todo")
+    if path_lower.endswith(("_test.py", ".spec.ts", ".test.ts", "test.py")):
+        score = max(5, score - 20)
+        tags.append("test")
+
+    return min(score, 100), tags
+
+
+def _current_head_sha(workspace_path: str) -> str:
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=workspace_path,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip() if result.returncode == 0 else ""
 
 
 def filter_file_diffs(raw_diff: str, extra_patterns: list[str]) -> tuple[str, int]:
@@ -146,6 +251,28 @@ def _apply_omit_deletions(raw_diff: str) -> str:
     return "\n".join(result)
 
 
+def parse_file_diffs(raw_diff: str) -> list[FileDiff]:
+    file_diffs = _split_into_file_diffs(raw_diff)
+    parsed: list[FileDiff] = []
+    for fd in file_diffs:
+        m = _DIFF_GIT_PATH_RE.match(fd)
+        if not m:
+            continue
+        path = m.group(1)
+        change_type = _detect_change_type(fd)
+        added_lines, deleted_lines = _count_changed_lines(fd)
+        parsed.append(
+            FileDiff(
+                path=path,
+                change_type=change_type,
+                content=fd,
+                added_lines=added_lines,
+                deleted_lines=deleted_lines,
+            )
+        )
+    return parsed
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -160,42 +287,28 @@ def detect_primary_language(file_paths: list[str]) -> str:
     return counts.most_common(1)[0][0] if counts else ""
 
 
-def extract_changed_files(diff_content: str) -> list[str]:
-    """diff 내용에서 변경된 파일 경로 목록을 반환한다."""
-    file_diffs = _split_into_file_diffs(diff_content)
-    paths = []
+def build_review_units(diff_content: str) -> list[ReviewUnit]:
+    file_diffs = parse_file_diffs(diff_content)
+    all_paths = [fd.path for fd in file_diffs]
+    units: list[ReviewUnit] = []
     for fd in file_diffs:
-        m = _DIFF_GIT_PATH_RE.match(fd)
-        if m:
-            paths.append(m.group(1))
-    return paths
-
-
-def split_diff_into_chunks(content: str, max_chars: int) -> list[str]:
-    """git diff를 파일 경계(diff --git)로 분할하여 max_chars 이하 청크 리스트로 반환."""
-    boundaries = [m.start() for m in _DIFF_FILE_HEADER.finditer(content)]
-    if not boundaries:
-        return [content[:max_chars]]
-
-    file_diffs = []
-    for i, start in enumerate(boundaries):
-        end = boundaries[i + 1] if i + 1 < len(boundaries) else len(content)
-        file_diffs.append(content[start:end])
-
-    chunks = []
-    current = ""
-    for fd in file_diffs:
-        if len(fd) > max_chars:
-            cut = fd.rfind("\n", 0, max_chars)
-            fd = (fd[:cut] + "\n# ...(truncated)") if cut > 0 else fd[:max_chars]
-        if current and len(current) + len(fd) > max_chars:
-            chunks.append(current)
-            current = fd
-        else:
-            current += fd
-    if current:
-        chunks.append(current)
-    return chunks
+        risk_score, tags = _score_review_unit(fd.path, fd.content, fd.added_lines, fd.deleted_lines)
+        unit_hash = hashlib.sha1(f"{fd.path}:{fd.change_type}".encode("utf-8")).hexdigest()[:12]
+        units.append(
+            ReviewUnit(
+                unit_id=f"{fd.path}#{unit_hash}",
+                path=fd.path,
+                change_type=fd.change_type,
+                diff=fd.content,
+                added_lines=fd.added_lines,
+                deleted_lines=fd.deleted_lines,
+                risk_score=risk_score,
+                tags=tags,
+                related_paths=_extract_related_paths(fd.path, all_paths),
+            )
+        )
+    units.sort(key=lambda item: item.risk_score, reverse=True)
+    return units
 
 
 _SIMILARITY_RE = re.compile(r"similarity index (\d+)%")
@@ -253,14 +366,14 @@ def extract_incremental_diff(workspace_path: str, mr_iid: str, oldrev: str) -> O
         content = result.stdout
         if not content.strip():
             logger.info(f"[MR #{mr_iid}] 증분 diff 없음 (빈 변경)")
-            return DiffResult(content="")
+            return DiffResult(content="", source_sha=_current_head_sha(workspace_path), target_sha=oldrev)
         extra = [p.strip() for p in settings.diff_ignore_patterns.split(",") if p.strip()]
         content, skipped = filter_file_diffs(content, extra)
         if skipped:
             logger.info(f"[MR #{mr_iid}] {skipped}개 파일 제외 (lock/binary/generated)")
         if settings.diff_omit_deletions:
             content = _apply_omit_deletions(content)
-        return DiffResult(content=content)
+        return DiffResult(content=content, source_sha=_current_head_sha(workspace_path), target_sha=oldrev)
     except Exception as e:
         logger.error(f"⚠️ [MR #{mr_iid}] 증분 diff 추출 에러: {str(e)}")
         return None
@@ -282,7 +395,7 @@ def extract_diff(workspace_path: str, mr_iid: str, source_branch: str, target_br
 
         if not content.strip():
             logger.info(f"[MR #{mr_iid}] diff 없음 (빈 변경)")
-            return DiffResult(content="")
+            return DiffResult(content="", source_sha=_current_head_sha(workspace_path), target_sha="")
 
         # ① 파일 필터링
         extra = [p.strip() for p in settings.diff_ignore_patterns.split(",") if p.strip()]
@@ -294,7 +407,15 @@ def extract_diff(workspace_path: str, mr_iid: str, source_branch: str, target_br
         if settings.diff_omit_deletions:
             content = _apply_omit_deletions(content)
 
-        return DiffResult(content=content)
+        source_sha = _current_head_sha(workspace_path)
+        target_result = subprocess.run(
+            ["git", "rev-parse", f"origin/{target_branch}"],
+            cwd=workspace_path,
+            capture_output=True,
+            text=True,
+        )
+        target_sha = target_result.stdout.strip() if target_result.returncode == 0 else ""
+        return DiffResult(content=content, source_sha=source_sha, target_sha=target_sha)
     except subprocess.CalledProcessError as e:
         error_msg = e.stderr.decode("utf-8", errors="replace").strip() if isinstance(e.stderr, bytes) else (e.stderr or "")
         logger.error(f"❌ [MR #{mr_iid}] Diff 추출 실패 (코드 {e.returncode}): {error_msg}")

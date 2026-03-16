@@ -202,7 +202,7 @@ INFO - ✅ [MR #5] GitLab 코멘트 전송 성공
 ❌ [MR #5] Aider 타임아웃 (600초 초과)
 ```
 
-→ `.env`에 `AIDER_TIMEOUT=900` 등으로 늘리거나, `DIFF_MAX_CHARS`를 줄여 처리량 감소
+→ `.env`에 `AIDER_TIMEOUT=900` 등으로 늘리거나, `DIFF_IGNORE_PATTERNS`를 조정해 불필요한 파일을 제외
 
 ### LLM 연결 실패
 
